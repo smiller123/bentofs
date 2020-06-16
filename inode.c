@@ -1,6 +1,8 @@
 /*
   Bento: Safe Rust file systems in the kernel
-TODO: figure out licensing stuff
+  Copyright (C) 2020  Samantha Miller, Kaiyuan Zhang, Danyang Zhuo, Tom
+      Anderson, Ang Chen, University of Washington
+  Copyright (C) 2001-2008  Miklos Szeredi <miklos@szeredi.hu>
 
   This program can be distributed under the terms of the GNU GPL.
   See the file COPYING.
