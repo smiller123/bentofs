@@ -118,6 +118,23 @@ static void bento_invalidate_entry(struct dentry *entry)
 	bento_invalidate_entry_cache(entry);
 }
 
+static void bento_lookup_init(struct bento_conn *fc, struct bento_in *inarg,
+			     struct bento_out *outarg,
+                             u64 nodeid, const struct qstr *name,
+                             struct fuse_entry_out *outentry)
+{
+        memset(outentry, 0, sizeof(struct fuse_entry_out));
+        inarg->h.opcode = FUSE_LOOKUP;
+        inarg->h.nodeid = nodeid;
+        inarg->numargs = 1;
+        inarg->args[0].size = name->len + 1;
+        inarg->args[0].value = name->name;
+        outarg->numargs = 1;
+        outarg->args[0].size = sizeof(struct fuse_entry_out);
+        outarg->args[0].value = outentry;
+}
+
+
 u64 bento_get_attr_version(struct bento_conn *fc)
 {
 	u64 curr_version;
@@ -155,7 +172,9 @@ static int bento_dentry_revalidate(struct dentry *entry, unsigned int flags)
 		goto invalid;
 	else if (time_before64(bento_dentry_time(entry), get_jiffies_64()) ||
 		 (flags & LOOKUP_REVAL)) {
-		struct fuse_entry_out outarg;
+		struct fuse_entry_out outentry;
+		struct bento_in inarg;
+		struct bento_out outarg;
 		struct bento_forget_link *forget;
 		u64 attr_version;
 
@@ -177,17 +196,17 @@ static int bento_dentry_revalidate(struct dentry *entry, unsigned int flags)
 		attr_version = bento_get_attr_version(fc);
 
 		parent = dget_parent(entry);
-		ret = fc->fs_ops->lookup(inode->i_sb,
-				get_node_id(d_inode(parent)),
-				entry->d_name.name, &outarg);
+		bento_lookup_init(fc, &inarg, &outarg, get_node_id(d_inode(parent)),
+                                 &entry->d_name, &outentry);
+		ret = fc->dispatch(fc->fs_ptr, FUSE_LOOKUP, &inarg, &outarg);
 		dput(parent);
 		/* Zero nodeid is same as -ENOENT */
-		if (!ret && !outarg.nodeid)
+		if (!ret && !outentry.nodeid)
 			ret = -ENOENT;
 		if (!ret) {
 			fi = get_bento_inode(inode);
-			if (outarg.nodeid != get_node_id(inode)) {
-				bento_queue_forget(fc, forget, outarg.nodeid, 1);
+			if (outentry.nodeid != get_node_id(inode)) {
+				bento_queue_forget(fc, forget, outentry.nodeid, 1);
 				goto invalid;
 			}
 			spin_lock(&fc->lock);
@@ -197,14 +216,14 @@ static int bento_dentry_revalidate(struct dentry *entry, unsigned int flags)
 		kfree(forget);
 		if (ret == -ENOMEM)
 			goto out;
-		if (ret || (outarg.attr.mode ^ inode->i_mode) & S_IFMT)
+		if (ret || (outentry.attr.mode ^ inode->i_mode) & S_IFMT)
 			goto invalid;
 
 		forget_all_cached_acls(inode);
-		bento_change_attributes(inode, &outarg.attr,
-				       entry_attr_timeout(&outarg),
+		bento_change_attributes(inode, &outentry.attr,
+				       entry_attr_timeout(&outentry),
 				       attr_version);
-		bento_change_entry_timeout(entry, &outarg);
+		bento_change_entry_timeout(entry, &outentry);
 	}
 	ret = 1;
 out:
@@ -251,12 +270,15 @@ int bento_valid_type(int m)
 }
 
 int bento_lookup_name(struct super_block *sb, u64 nodeid, const struct qstr *name,
-		     struct fuse_entry_out *outarg, struct inode **inode)
+		     struct fuse_entry_out *outentry, struct inode **inode)
 {
 	struct bento_conn *fc = get_bento_conn_super(sb);
 	struct bento_forget_link *forget;
 	u64 attr_version;
 	int err;
+	struct bento_in inarg;
+	struct bento_out outarg;
+	
 
 	*inode = NULL;
 	err = -ENAMETOOLONG;
@@ -271,23 +293,24 @@ int bento_lookup_name(struct super_block *sb, u64 nodeid, const struct qstr *nam
 
 	attr_version = bento_get_attr_version(fc);
 
-	err = fc->fs_ops->lookup(sb, nodeid, name->name, outarg);
+	bento_lookup_init(fc, &inarg, &outarg, nodeid, name, outentry);
+	err = fc->dispatch(fc->fs_ptr, FUSE_LOOKUP, &inarg, &outarg);
 	/* Zero nodeid is same as -ENOENT, but with valid timeout */
-	if (err || !outarg->nodeid)
+	if (err || !outentry->nodeid)
 		goto out_put_forget;
 
 	err = -EIO;
-	if (!outarg->nodeid)
+	if (!outentry->nodeid)
 		goto out_put_forget;
-	if (!bento_valid_type(outarg->attr.mode))
+	if (!bento_valid_type(outentry->attr.mode))
 		goto out_put_forget;
 
-	*inode = bento_iget(sb, outarg->nodeid, outarg->generation,
-			   &outarg->attr, entry_attr_timeout(outarg),
+	*inode = bento_iget(sb, outentry->nodeid, outentry->generation,
+			   &outentry->attr, entry_attr_timeout(outentry),
 			   attr_version);
 	err = -ENOMEM;
 	if (!*inode) {
-		bento_queue_forget(fc, forget, outarg->nodeid, 1);
+		bento_queue_forget(fc, forget, outentry->nodeid, 1);
 		goto out;
 	}
 	err = 0;
@@ -358,6 +381,8 @@ static int bento_create_open(struct inode *dir, struct dentry *entry,
 	struct fuse_create_in inarg;
 	struct fuse_open_out outopen;
 	struct fuse_entry_out outentry;
+	struct bento_in in;
+	struct bento_out out;
 	struct bento_file *ff;
 
 	/* Userspace expects S_IFREG in create mode */
@@ -382,8 +407,19 @@ static int bento_create_open(struct inode *dir, struct dentry *entry,
 	inarg.flags = flags;
 	inarg.mode = mode;
 	inarg.umask = current_umask();
-	err = fc->fs_ops->create(dir->i_sb, get_node_id(dir), &inarg,
-			entry->d_name.name, &outentry, &outopen);
+	in.h.opcode = FUSE_CREATE;
+        in.h.nodeid = get_node_id(dir);
+        in.numargs = 2;
+        in.args[0].size = sizeof(inarg);
+        in.args[0].value = &inarg;
+        in.args[1].size = entry->d_name.len + 1;
+        in.args[1].value = entry->d_name.name;
+        out.numargs = 2;
+        out.args[0].size = sizeof(outentry);
+        out.args[0].value = &outentry;
+        out.args[1].size = sizeof(outopen);
+        out.args[1].value = &outopen;
+	err = fc->dispatch(fc->fs_ptr, FUSE_CREATE, &in, &out);
 	if (err)
 		goto out_free_ff;
 
@@ -479,33 +515,28 @@ static int create_new_entry(struct bento_conn *fc, struct bento_args *args,
 	struct inode *inode;
 	struct bento_forget_link *forget;
 	int err = 0;
+	struct bento_in in;
+	struct bento_out out;
 
 	forget = bento_alloc_forget();
 	if (!forget)
 		return -ENOMEM;
 
 	memset(&outarg, 0, sizeof(outarg));
+
+	in.h.opcode = args->in.h.opcode;
+	in.numargs = args->in.numargs;
+        in.args[0].size = args->in.args[0].size;
+        in.args[0].value = args->in.args[0].value;
+        in.args[1].size = args->in.args[1].size;
+        in.args[1].value = args->in.args[1].value;
+	in.h.nodeid = get_node_id(dir);
+        out.numargs = 1;
+        out.args[0].size = sizeof(outarg);
+        out.args[0].value = &outarg;
+
     
-	switch (args->in.h.opcode) {
-	case FUSE_MKNOD:
-		err = fc->fs_ops->mknod(dir->i_sb, get_node_id(dir),
-				(struct fuse_mknod_in *)args->in.args[0].value,
-				entry->d_name.name, &outarg);
-        	break;
-	case FUSE_MKDIR:
-		err = fc->fs_ops->mkdir(dir->i_sb, get_node_id(dir),
-				(struct fuse_mkdir_in *)args->in.args[0].value,
-				entry->d_name.name, &outarg);
-		break;
-	case FUSE_SYMLINK:
-		err = fc->fs_ops->symlink(dir->i_sb, get_node_id(dir),
-				(const char *)args->in.args[0].value,
-				(const char *)args->in.args[1].value,
-				&outarg);
-		break;
-	default:
-		err = -ENOSYS;
-	}
+	err = fc->dispatch(fc->fs_ptr, args->in.h.opcode, &in, &out);
 	if (err)
 		goto out_put_forget_req;
 
@@ -615,7 +646,15 @@ static int bento_unlink(struct inode *dir, struct dentry *entry)
 {
 	int err;
 	struct bento_conn *fc = get_bento_conn(dir);
-	err = fc->fs_ops->unlink(dir->i_sb, get_node_id(dir), entry->d_name.name);
+	struct bento_in in;
+	struct bento_out out;
+	in.h.opcode = FUSE_UNLINK;
+        in.h.nodeid = get_node_id(dir);
+        in.numargs = 1;
+        in.args[0].size = entry->d_name.len + 1;
+        in.args[0].value = entry->d_name.name;
+	out.numargs = 0;
+	err = fc->dispatch(fc->fs_ptr, FUSE_UNLINK, &in, &out);
 	if (!err) {
 		struct inode *inode = d_inode(entry);
 		struct bento_inode *fi = get_bento_inode(inode);
@@ -644,8 +683,16 @@ static int bento_rmdir(struct inode *dir, struct dentry *entry)
 {
 	int err;
 	struct bento_conn *fc = get_bento_conn(dir);
+	struct bento_in in;
+	struct bento_out out;
+	in.h.opcode = FUSE_RMDIR;
+        in.h.nodeid = get_node_id(dir);
+        in.numargs = 1;
+        in.args[0].size = entry->d_name.len + 1;
+        in.args[0].value = entry->d_name.name;
+	out.numargs = 0;
 
-	err = fc->fs_ops->rmdir(dir->i_sb, get_node_id(dir), entry->d_name.name);
+	err = fc->dispatch(fc->fs_ptr, FUSE_RMDIR, &in, &out);
 	if (!err) {
 		clear_nlink(d_inode(entry));
 		bento_invalidate_attr(dir);
@@ -662,13 +709,23 @@ static int bento_rename_common(struct inode *olddir, struct dentry *oldent,
 	int err;
 	struct fuse_rename2_in inarg;
 	struct bento_conn *fc = get_bento_conn(olddir);
+	struct bento_in in;
+	struct bento_out out;
 
 	memset(&inarg, 0, argsize);
 	inarg.newdir = get_node_id(newdir);
 	inarg.flags = flags;
+        in.h.opcode = opcode;
+        in.h.nodeid = get_node_id(olddir);
+        in.numargs = 3;
+        in.args[0].size = argsize;
+        in.args[0].value = &inarg;
+        in.args[1].size = oldent->d_name.len + 1;
+        in.args[1].value = oldent->d_name.name;
+        in.args[2].size = newent->d_name.len + 1;
+        in.args[2].value = newent->d_name.name;
 
-	err = fc->fs_ops->rename(fc->sb, get_node_id(olddir), &inarg,
-			oldent->d_name.name, newent->d_name.name);
+	err = fc->dispatch(fc->fs_ptr, opcode, &in, &out);
 	if (!err) {
 		/* ctime changes */
 		bento_invalidate_attr(d_inode(oldent));
@@ -819,6 +876,8 @@ static int bento_do_getattr(struct inode *inode, struct kstat *stat,
 	struct fuse_attr_out outarg;
 	struct bento_conn *fc = get_bento_conn(inode);
 	u64 attr_version;
+	struct bento_in bento_inarg;
+	struct bento_out bento_outarg;
 
 	attr_version = bento_get_attr_version(fc);
 
@@ -831,8 +890,15 @@ static int bento_do_getattr(struct inode *inode, struct kstat *stat,
 		inarg.getattr_flags |= FUSE_GETATTR_FH;
 		inarg.fh = ff->fh;
 	}
-	err = fc->fs_ops->getattr(inode->i_sb, get_node_id(inode),
-				&inarg, &outarg);
+	bento_inarg.h.opcode = FUSE_GETATTR;
+        bento_inarg.h.nodeid = get_node_id(inode);
+        bento_inarg.numargs = 1;
+        bento_inarg.args[0].size = sizeof(inarg);
+        bento_inarg.args[0].value = &inarg;
+        bento_outarg.numargs = 1;
+        bento_outarg.args[0].size = sizeof(outarg);
+        bento_outarg.args[0].value = &outarg;
+	err = fc->dispatch(fc->fs_ptr, FUSE_GETATTR, &bento_inarg, &bento_outarg);
 	if (!err) {
 		if ((inode->i_mode ^ outarg.attr.mode) & S_IFMT) {
 			make_bad_inode(inode);
@@ -973,6 +1039,8 @@ static int bento_access(struct inode *inode, int mask)
 {
 	struct bento_conn *fc = get_bento_conn(inode);
 	struct fuse_access_in inarg;
+	struct bento_in in;
+	struct bento_out out;
 	int err;
 
 	BUG_ON(mask & MAY_NOT_BLOCK);
@@ -982,7 +1050,12 @@ static int bento_access(struct inode *inode, int mask)
 
 	memset(&inarg, 0, sizeof(inarg));
 	inarg.mask = mask & (MAY_READ | MAY_WRITE | MAY_EXEC);
-	err = fc->fs_ops->access(inode->i_sb, get_node_id(inode), &inarg);
+	in.h.opcode = FUSE_ACCESS;
+        in.h.nodeid = get_node_id(inode);
+        in.numargs = 1;
+        in.args[0].size = sizeof(inarg);
+        in.args[0].value = &inarg;
+	err = fc->dispatch(fc->fs_ptr, FUSE_ACCESS, &in, &out);
 	if (err == -ENOSYS) {
 		fc->no_access = 1;
 		err = 0;
@@ -1103,8 +1176,10 @@ static int bento_readdir(struct file *file, struct dir_context *ctx)
 	struct bento_conn *fc = get_bento_conn(inode);
 	struct bento_req *req;
 	char *buf;
-	struct bento_file *ff = file->private_data;
 	struct bento_buffer send_buf;
+	struct bento_in in;
+	struct bento_out out;
+	struct fuse_read_in inarg;
 
 	if (is_bad_inode(inode))
 		return -EIO;
@@ -1124,15 +1199,14 @@ static int bento_readdir(struct file *file, struct dir_context *ctx)
 	req->pages[0] = page;
 	req->page_descs[0].length = PAGE_SIZE;
 
-	bento_read_fill(req, file, ctx->pos, PAGE_SIZE,
-		       FUSE_READDIR);
 	buf = kmap(page);
 	bento_lock_inode(inode);
 	send_buf.ptr = buf;
 	send_buf.bufsize = PAGE_SIZE;
 	send_buf.drop = false;
-	err = fc->fs_ops->readdir(file_inode(file)->i_sb, ff->nodeid,
-			&req->misc.read.in, &send_buf, &nbytes);
+	bento_read_fill(&in, &out, &inarg, &send_buf, file, ctx->pos, PAGE_SIZE, FUSE_READDIR);
+	err = fc->dispatch(fc->fs_ptr, FUSE_READDIR, &in, &out);
+	nbytes = out.args[0].size;
 	bento_unlock_inode(inode);
 	bento_request_free(req);
 	if (!err) {
@@ -1153,6 +1227,8 @@ static const char *bento_get_link(struct dentry *dentry,
 	char *link;
 	ssize_t ret;
 	struct bento_buffer buf;
+	struct bento_in in;
+	struct bento_out out;
 
 	if (!dentry)
 		return ERR_PTR(-ECHILD);
@@ -1164,7 +1240,17 @@ static const char *bento_get_link(struct dentry *dentry,
 	buf.ptr = link;
 	buf.bufsize = PAGE_SIZE -1;
 	buf.drop = false;
-	ret = fc->fs_ops->readlink(inode->i_sb, get_node_id(inode), &buf);
+
+	out.page_zeroing = 1;
+        out.argpages = 1;
+        in.h.opcode = FUSE_READLINK;
+        in.h.nodeid = get_node_id(inode);
+        out.argvar = 1;
+        out.numargs = 1;
+        out.args[0].size = PAGE_SIZE - 1;
+	out.args[0].value = &buf;
+
+	ret = fc->dispatch(fc->fs_ptr, FUSE_READLINK, &in, &out);
 	if (ret < 0) {
 		kfree(link);
 		link = ERR_PTR(ret);
@@ -1322,6 +1408,8 @@ int bento_flush_times(struct inode *inode, struct bento_file *ff)
 	struct bento_conn *fc = get_bento_conn(inode);
 	struct fuse_setattr_in inarg;
 	struct fuse_attr_out outarg;
+	struct bento_in bento_inarg;
+	struct bento_out bento_outarg;
         int err;
 
 	memset(&inarg, 0, sizeof(inarg));
@@ -1340,8 +1428,16 @@ int bento_flush_times(struct inode *inode, struct bento_file *ff)
 		inarg.fh = ff->fh;
 	}
 
-	err = fc->fs_ops->setattr(inode->i_sb, get_node_id(inode), &inarg,
-			&outarg);
+	bento_inarg.h.opcode = FUSE_SETATTR;
+        bento_inarg.h.nodeid = get_node_id(inode);
+        bento_inarg.numargs = 1;
+        bento_inarg.args[0].size = sizeof(inarg);
+        bento_inarg.args[0].value = &inarg;
+        bento_outarg.numargs = 1;
+        bento_outarg.args[0].size = sizeof(outarg);
+        bento_outarg.args[0].value = &outarg;
+	err = fc->dispatch(fc->fs_ptr, FUSE_SETATTR, &bento_inarg,
+			&bento_outarg);
 	return err;
 }
 
@@ -1361,6 +1457,8 @@ int bento_do_setattr(struct dentry *dentry, struct iattr *attr,
 	struct bento_inode *fi = get_bento_inode(inode);
 	struct fuse_setattr_in inarg;
 	struct fuse_attr_out outarg;
+	struct bento_in bento_inarg;
+	struct bento_out bento_outarg;
 	bool is_truncate = false;
 	bool is_wb = fc->writeback_cache;
 	loff_t oldsize;
@@ -1403,8 +1501,16 @@ int bento_do_setattr(struct dentry *dentry, struct iattr *attr,
 		inarg.valid |= FATTR_LOCKOWNER;
 		inarg.lock_owner = bento_lock_owner_id(fc, current->files);
 	}
-	err = fc->fs_ops->setattr(inode->i_sb, get_node_id(inode), &inarg,
-			&outarg);
+	bento_inarg.h.opcode = FUSE_SETATTR;
+        bento_inarg.h.nodeid = get_node_id(inode);
+        bento_inarg.numargs = 1;
+        bento_inarg.args[0].size = sizeof(inarg);
+        bento_inarg.args[0].value = &inarg;
+        bento_outarg.numargs = 1;
+        bento_outarg.args[0].size = sizeof(outarg);
+        bento_outarg.args[0].value = &outarg;
+	err = fc->dispatch(fc->fs_ptr, FUSE_SETATTR, &bento_inarg,
+			&bento_outarg);
 	if (err) {
 		if (err == -EINTR)
 			bento_invalidate_attr(inode);

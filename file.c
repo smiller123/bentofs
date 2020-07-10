@@ -19,20 +19,24 @@ static int bento_send_open(struct bento_conn *fc, u64 nodeid, struct file *file,
 			  int opcode, struct fuse_open_out *outargp)
 {
 	struct fuse_open_in inarg;
+	struct bento_in in;
+	struct bento_out out;
 
 	memset(&inarg, 0, sizeof(inarg));
+
 	inarg.flags = file->f_flags & ~(O_CREAT | O_EXCL | O_NOCTTY);
 	if (!fc->atomic_o_trunc)
 		inarg.flags &= ~O_TRUNC;
+        in.h.opcode = opcode;
+        in.h.nodeid = nodeid;
+        in.numargs = 1;
+        in.args[0].size = sizeof(inarg);
+        in.args[0].value = &inarg;
+        out.numargs = 1;
+        out.args[0].size = sizeof(*outargp);
+        out.args[0].value = outargp;
 
-	if (opcode == FUSE_OPEN) {
-		return fc->fs_ops->open(file_inode(file)->i_sb, nodeid, &inarg,
-				outargp);
-	} else {
-		return fc->fs_ops->opendir(file_inode(file)->i_sb, nodeid,
-				&inarg, outargp);
-	}
-	return -ENOSYS;
+	return fc->dispatch(fc->fs_ptr, opcode, &in, &out);
 }
 
 struct bento_file *bento_file_alloc(struct bento_conn *fc)
@@ -89,13 +93,15 @@ static void bento_file_put(struct bento_file *ff, bool sync)
 			iput(req->misc.release.inode);
 			bento_put_request(ff->fc, req);
 		} else {
-			if (req->in.h.opcode == FUSE_RELEASE) {
-				ff->fc->fs_ops->release(ff->fc->sb, req->in.h.nodeid,
-					(struct fuse_release_in *) req->in.args[0].value);
-			} else if (req->in.h.opcode == FUSE_RELEASEDIR) {
-				ff->fc->fs_ops->releasedir(ff->fc->sb, req->in.h.nodeid,
-					(struct fuse_release_in *) req->in.args[0].value);
-			}
+			struct bento_in in;
+			struct bento_out out;
+			in.h.opcode = req->in.h.opcode;
+			in.h.nodeid = req->in.h.nodeid;
+			in.numargs = req->in.numargs;
+			in.args[0].size = req->in.args[0].size;
+			in.args[0].value = req->in.args[0].value;
+			ff->fc->dispatch(ff->fc->fs_ptr, req->in.h.opcode,
+					&in, &out);
 			iput(req->misc.release.inode);
 			bento_put_request(ff->fc, req);
 		}
@@ -268,8 +274,6 @@ static int bento_open(struct inode *inode, struct file *file)
 
 static int bento_release(struct inode *inode, struct file *file)
 {
-	struct bento_conn *fc = get_bento_conn(inode);
-
 	bento_release_common(file, FUSE_RELEASE);
 
 	/* return value is ignored by VFS */
@@ -380,6 +384,8 @@ static int bento_flush(struct file *file, fl_owner_t id)
 	struct bento_conn *fc = get_bento_conn(inode);
 	struct bento_file *ff = file->private_data;
 	struct fuse_flush_in inarg;
+	struct bento_in in;
+	struct bento_out out;
 	int err;
 
 	if (is_bad_inode(inode))
@@ -403,7 +409,14 @@ static int bento_flush(struct file *file, fl_owner_t id)
 	memset(&inarg, 0, sizeof(inarg));
 	inarg.fh = ff->fh;
 	inarg.lock_owner = bento_lock_owner_id(fc, id);
-	err = fc->fs_ops->flush(inode->i_sb, get_node_id(inode), &inarg);
+        in.h.opcode = FUSE_FLUSH;
+        in.h.nodeid = get_node_id(inode);
+        in.numargs = 1;
+        in.args[0].size = sizeof(inarg);
+        in.args[0].value = &inarg;
+	memset(&out, 0, sizeof(out));
+
+	err = fc->dispatch(fc->fs_ptr, FUSE_FLUSH, &in, &out);
 	if (err == -ENOSYS) {
 		fc->no_flush = 1;
 		err = 0;
@@ -418,6 +431,8 @@ int bento_fsync_common(struct file *file, loff_t start, loff_t end,
 	struct bento_conn *fc = get_bento_conn(inode);
 	struct bento_file *ff = file->private_data;
 	struct fuse_fsync_in inarg;
+	struct bento_in in;
+	struct bento_out out;
 	int err;
 
 	if (is_bad_inode(inode))
@@ -455,11 +470,13 @@ int bento_fsync_common(struct file *file, loff_t start, loff_t end,
 	memset(&inarg, 0, sizeof(inarg));
 	inarg.fh = ff->fh;
 	inarg.fsync_flags = datasync ? 1 : 0;
-	if (isdir) {
-		err = fc->fs_ops->fsyncdir(inode->i_sb, get_node_id(inode), &inarg);
-	} else {
-		err = fc->fs_ops->fsync(inode->i_sb, get_node_id(inode), &inarg);
-	}
+	in.h.opcode = isdir ? FUSE_FSYNCDIR : FUSE_FSYNC;
+        in.h.nodeid = get_node_id(inode);
+        in.numargs = 1;
+        in.args[0].size = sizeof(inarg);
+        in.args[0].value = &inarg;
+
+	err = fc->dispatch(fc->fs_ptr, in.h.opcode, &in, &out);
 	if (err == -ENOSYS) {
 		if (isdir)
 			fc->no_fsyncdir = 1;
@@ -480,7 +497,27 @@ static int bento_fsync(struct file *file, loff_t start, loff_t end,
         return ret;
 }
 
-void bento_read_fill(struct bento_req *req, struct file *file, loff_t pos,
+void bento_read_fill(struct bento_in *in, struct bento_out *out, struct fuse_read_in *inarg,
+		    struct bento_buffer* buf, struct file *file, loff_t pos, size_t count, int opcode)
+{
+	struct bento_file *ff = file->private_data;
+
+	inarg->fh = ff->fh;
+	inarg->offset = pos;
+	inarg->size = count;
+	inarg->flags = file->f_flags;
+	in->h.opcode = opcode;
+	in->h.nodeid = ff->nodeid;
+	in->numargs = 1;
+	in->args[0].size = sizeof(struct fuse_read_in);
+	in->args[0].value = inarg;
+	out->argvar = 1;
+	out->numargs = 1;
+	out->args[0].size = count;
+	out->args[0].value = buf;
+}
+
+void bento_read_fill_old(struct bento_req *req, struct file *file, loff_t pos,
 		    size_t count, int opcode)
 {
 	struct fuse_read_in *inarg = &req->misc.read.in;
@@ -499,6 +536,7 @@ void bento_read_fill(struct bento_req *req, struct file *file, loff_t pos,
 	req->out.numargs = 1;
 	req->out.args[0].size = count;
 }
+
 
 static void bento_release_user_pages(struct bento_req *req, bool should_dirty)
 {
@@ -526,7 +564,6 @@ static size_t bento_send_read(struct bento_req *req, struct bento_io_priv *io,
 	size_t bytes_read = 0;
 	int i;
 
-	bento_read_fill(req, file, pos, count, FUSE_READ);
 	if (owner != NULL) {
 		struct fuse_read_in *inarg = &req->misc.read.in;
 
@@ -534,27 +571,28 @@ static size_t bento_send_read(struct bento_req *req, struct bento_io_priv *io,
 		inarg->lock_owner = bento_lock_owner_id(fc, owner);
 	}
 	for (i = 0; i < req->num_pages; i++) {
-		struct fuse_read_in *inarg = &req->misc.read.in;
 		struct bento_buffer send_buf;
-		struct inode *inode = file_inode(file);
 		size_t num_read;
+		struct bento_in in;
+		struct bento_out out;
+		struct fuse_read_in inarg;
 	
-		send_buf.ptr = kmap(req->pages[i]);
+		send_buf.ptr = kmap_atomic(req->pages[i]);
 		send_buf.bufsize = min(count, PAGE_SIZE);
 		send_buf.drop = false;
-		inarg->size = send_buf.bufsize;
-		num_read = fc->fs_ops->read(inode->i_sb, req->in.h.nodeid,
-				inarg, &send_buf);
+		bento_read_fill(&in, &out, &inarg, &send_buf, file, pos, min(count, PAGE_SIZE), FUSE_READ);
+		num_read = fc->dispatch(fc->fs_ptr, FUSE_READ, &in, &out);
 		if (num_read != send_buf.bufsize) {
-			kunmap(req->pages[i]);
+			kunmap_atomic(send_buf.ptr);
 			break;
 		}
-		inarg->offset += num_read;
+		pos += num_read;
 		bytes_read += num_read;
 		count -= num_read;
-		kunmap(req->pages[i]);
+		kunmap_atomic(send_buf.ptr);
 	}
-	
+
+	req->out.args[0].size = bytes_read;
 	return bytes_read;
 }
 
@@ -707,30 +745,28 @@ static void bento_send_readpages(struct bento_req *req, struct file *file)
 	struct bento_file *ff = file->private_data;
 	struct bento_conn *fc = ff->fc;
 	loff_t pos = page_offset(req->pages[0]);
-	size_t count = req->num_pages << PAGE_SHIFT;
 	int i;
 
 	req->out.argpages = 1;
 	req->out.page_zeroing = 1;
 	req->out.page_replace = 1;
-	bento_read_fill(req, file, pos, count, FUSE_READ);
 	for (i = 0; i < req->num_pages; i++) {
-		struct fuse_read_in *inarg = &req->misc.read.in;
 		struct bento_buffer send_buf;
-		struct inode *inode = file_inode(file);
 		int num_read;
+		struct bento_in in;
+		struct bento_out out;
+		struct fuse_read_in inarg;
 
 		send_buf.ptr = kmap(req->pages[i]);
 		send_buf.bufsize = PAGE_SIZE;
 		send_buf.drop = false;
-		inarg->size = PAGE_SIZE;
-		num_read = fc->fs_ops->read(inode->i_sb, req->in.h.nodeid, inarg,
-				&send_buf);
+		bento_read_fill(&in, &out, &inarg, &send_buf, file, pos, PAGE_SIZE, FUSE_READ);
+		num_read = fc->dispatch(fc->fs_ptr, FUSE_READ, &in, &out);
 		if (num_read < 0) {
 			kunmap(req->pages[i]);
 			break;
 		}
-		inarg->offset += num_read;
+		pos += num_read;
 
 		kunmap(req->pages[i]);
 	}
@@ -869,11 +905,8 @@ static size_t bento_send_write(struct bento_req *req, struct bento_io_priv *io,
 	struct bento_conn *fc = ff->fc;
 	struct fuse_write_in *inarg = &req->misc.write.in;
 	size_t written = 0;
-	struct inode *i = file_inode(file);
 	int j;
 
-	bento_write_fill(req, ff, pos, count);
-	inarg->flags = file->f_flags;
 	if (iocb->ki_flags & IOCB_DSYNC)
 		inarg->flags |= O_DSYNC;
 	if (iocb->ki_flags & IOCB_SYNC)
@@ -884,6 +917,8 @@ static size_t bento_send_write(struct bento_req *req, struct bento_io_priv *io,
 	}
 
 	for (j = 0; j < req->num_pages; j++) {
+		struct bento_in in;
+		struct bento_out out;
 		struct bento_buffer buf;
 		unsigned int page_off = req->page_descs[j].offset;
 		unsigned int page_length = req->page_descs[j].length;
@@ -892,9 +927,21 @@ static size_t bento_send_write(struct bento_req *req, struct bento_io_priv *io,
 		buf.ptr = page_buf + page_off;
 		buf.bufsize = page_length;
 		buf.drop = false;
-		inarg->size = page_length;
-		fc->fs_ops->write(i->i_sb, ff->nodeid, inarg, &buf, &req->misc.write.out);
-		inarg->offset += page_length;
+		bento_write_fill(req, ff, pos, page_length);
+		inarg->flags = file->f_flags;
+
+		in.h.opcode = req->in.h.opcode;
+		in.numargs = req->in.numargs;
+        	in.args[0].size = req->in.args[0].size;
+        	in.args[0].value = req->in.args[0].value;
+        	in.args[1].size = req->in.args[1].size;
+        	in.args[1].value = &buf;
+		in.h.nodeid = req->in.h.nodeid;
+        	out.numargs = req->out.numargs;
+        	out.args[0].size = req->out.args[0].size;
+        	out.args[0].value = req->out.args[0].value;
+		fc->dispatch(fc->fs_ptr, FUSE_WRITE, &in, &out);
+		pos += page_length;
 
 		kunmap_atomic(page_buf);
 		written += page_length;
@@ -1394,6 +1441,8 @@ __acquires(fc->lock)
 	struct bento_inode *fi = get_bento_inode(req->inode);
 	struct fuse_write_in *inarg = &req->misc.write.in;
 	__u64 data_size = req->num_pages * PAGE_SIZE;
+        size_t written = 0;
+	int j;
 
 	if (!fc->connected)
 		goto out_free;
@@ -1409,36 +1458,44 @@ __acquires(fc->lock)
 
 	req->in.args[1].size = inarg->size;
 	fi->writectr++;
-	if (fc->fs_ops->write) {
-                size_t written = 0;
-                struct inode *i = req->inode;
-		int j;
 
-                spin_unlock(&fc->lock);
+        spin_unlock(&fc->lock);
 
-		for (j = 0; j < req->num_pages; j++) {
-                	struct bento_buffer buf;
-			unsigned int page_off = req->page_descs[j].offset;
-			unsigned int page_length = req->page_descs[j].length;
+	for (j = 0; j < req->num_pages; j++) {
+		struct bento_in in;
+		struct bento_out out;
+        	struct bento_buffer buf;
+		unsigned int page_off = req->page_descs[j].offset;
+		unsigned int page_length = req->page_descs[j].length;
 
-			buf.ptr = kmap(req->pages[j]) + page_off;
-                	buf.bufsize = page_length;
-                	buf.drop = false;
-			inarg->size = page_length;
-                	fc->fs_ops->write(i->i_sb, fi->nodeid, inarg, &buf, &req->misc.write.out);
-			kunmap(req->pages[j]);
+		buf.ptr = kmap(req->pages[j]) + page_off;
+        	buf.bufsize = page_length;
+        	buf.drop = false;
 
-			inarg->offset += page_length;
-                        written += page_length;
-			req->misc.write.out.size = written;
-                }
+		in.h.opcode = req->in.h.opcode;
+		in.numargs = req->in.numargs;
+        	in.args[0].size = req->in.args[0].size;
+        	in.args[0].value = req->in.args[0].value;
+        	in.args[1].size = req->in.args[1].size;
+        	in.args[1].value = &buf;
+		in.h.nodeid = req->in.h.nodeid;
+        	out.numargs = req->out.numargs;
+        	out.args[0].size = req->out.args[0].size;
+        	out.args[0].value = req->out.args[0].value;
+		inarg->size = page_length;
+		fc->dispatch(fc->fs_ptr, FUSE_WRITE, &in, &out);
+		kunmap(req->pages[j]);
 
-                if (req->end) {
-	               	req->end(fc, req);
-                }
-		bento_put_request(fc, req);
-		spin_lock(&fc->lock);
-	}
+		inarg->offset += page_length;
+                written += page_length;
+		req->misc.write.out.size = written;
+        }
+
+        if (req->end) {
+	       	req->end(fc, req);
+        }
+	bento_put_request(fc, req);
+	spin_lock(&fc->lock);
 	return;
 
  out_free:
@@ -2064,9 +2121,9 @@ static int convert_bento_file_lock(struct bento_conn *fc,
 	return 0;
 }
 
-static void bento_lk_fill(struct bento_args *args, struct file *file,
-			 const struct file_lock *fl, int opcode, pid_t pid,
-			 int flock, struct fuse_lk_in *inarg)
+static void bento_lk_fill(struct bento_in *in, struct file *file,
+			 const struct file_lock *fl, int opcode,
+			 pid_t pid, int flock, struct fuse_lk_in *inarg)
 {
 	struct inode *inode = file_inode(file);
 	struct bento_conn *fc = get_bento_conn(inode);
@@ -2081,28 +2138,28 @@ static void bento_lk_fill(struct bento_args *args, struct file *file,
 	inarg->lk.pid = pid;
 	if (flock)
 		inarg->lk_flags |= FUSE_LK_FLOCK;
-	args->in.h.opcode = opcode;
-	args->in.h.nodeid = get_node_id(inode);
-	args->in.numargs = 1;
-	args->in.args[0].size = sizeof(*inarg);
-	args->in.args[0].value = inarg;
+	in->h.opcode = opcode;
+	in->h.nodeid = get_node_id(inode);
+	in->numargs = 1;
+	in->args[0].size = sizeof(*inarg);
+	in->args[0].value = inarg;
 }
 
 static int bento_getlk(struct file *file, struct file_lock *fl)
 {
 	struct inode *inode = file_inode(file);
 	struct bento_conn *fc = get_bento_conn(inode);
-	BENTO_ARGS(args);
 	struct fuse_lk_in inarg;
 	struct fuse_lk_out outarg;
+	struct bento_in in;
+	struct bento_out out;
 	int err;
 
-	bento_lk_fill(&args, file, fl, FUSE_GETLK, 0, 0, &inarg);
-	args.out.numargs = 1;
-	args.out.args[0].size = sizeof(outarg);
-	args.out.args[0].value = &outarg;
-	err = fc->fs_ops->getlk(inode->i_sb, get_node_id(inode), &inarg,
-			&outarg);
+	bento_lk_fill(&in, file, fl, FUSE_GETLK, 0, 0, &inarg);
+	out.numargs = 1;
+	out.args[0].size = sizeof(outarg);
+	out.args[0].value = &outarg;
+	err = fc->dispatch(fc->fs_ptr, FUSE_GETLK, &in, &out);
 	if (!err)
 		err = convert_bento_file_lock(fc, &outarg.lk, fl);
 
@@ -2113,8 +2170,9 @@ static int bento_setlk(struct file *file, struct file_lock *fl, int flock)
 {
 	struct inode *inode = file_inode(file);
 	struct bento_conn *fc = get_bento_conn(inode);
-	BENTO_ARGS(args);
 	struct fuse_lk_in inarg;
+	struct bento_in in;
+	struct bento_out out;
 	int opcode = (fl->fl_flags & FL_SLEEP) ? FUSE_SETLKW : FUSE_SETLK;
 	struct pid *pid = fl->fl_type != F_UNLCK ? task_tgid(current) : NULL;
 	pid_t pid_nr = pid_nr_ns(pid, fc->pid_ns);
@@ -2129,8 +2187,8 @@ static int bento_setlk(struct file *file, struct file_lock *fl, int flock)
 	if ((fl->fl_flags & FL_CLOSE_POSIX) == FL_CLOSE_POSIX)
 		return 0;
 
-	bento_lk_fill(&args, file, fl, opcode, pid_nr, flock, &inarg);
-	err = fc->fs_ops->setlk(inode->i_sb, get_node_id(inode), &inarg, fl->fl_flags & FL_SLEEP);
+	bento_lk_fill(&in, file, fl, opcode, pid_nr, flock, &inarg);
+	err = fc->dispatch(fc->fs_ptr, opcode, &in, &out);
 
 	/* locking is restartable */
 	if (err == -EINTR)
@@ -2187,6 +2245,8 @@ static sector_t bento_bmap(struct address_space *mapping, sector_t block)
 	struct bento_conn *fc = get_bento_conn(inode);
 	struct fuse_bmap_in inarg;
 	struct fuse_bmap_out outarg;
+	struct bento_in in;
+	struct bento_out out;
 	int err;
 
 	if (!inode->i_sb->s_bdev || fc->no_bmap)
@@ -2195,7 +2255,15 @@ static sector_t bento_bmap(struct address_space *mapping, sector_t block)
 	memset(&inarg, 0, sizeof(inarg));
 	inarg.block = block;
 	inarg.blocksize = inode->i_sb->s_blocksize;
-	err = fc->fs_ops->bmap(inode->i_sb, get_node_id(inode), &inarg, &outarg);
+	in.h.opcode = FUSE_BMAP;
+        in.h.nodeid = get_node_id(inode);
+        in.numargs = 1;
+        in.args[0].size = sizeof(inarg);
+        in.args[0].value = &inarg;
+        out.numargs = 1;
+        out.args[0].size = sizeof(outarg);
+        out.args[0].value = &outarg;
+	err = fc->dispatch(fc->fs_ptr, FUSE_BMAP, &in, &out);
 	if (err == -ENOSYS)
 		fc->no_bmap = 1;
 
@@ -2213,12 +2281,22 @@ static loff_t bento_lseek(struct file *file, loff_t offset, int whence)
 		.whence = whence
 	};
 	struct fuse_lseek_out outarg;
+	struct bento_in in;
+	struct bento_out out;
 	int err;
 
 	if (fc->no_lseek)
 		goto fallback;
 
-	err = fc->fs_ops->lseek(inode->i_sb, ff->nodeid, &inarg, &outarg);
+	in.h.opcode = FUSE_LSEEK;
+        in.h.nodeid = ff->nodeid;
+        in.numargs = 1;
+        in.args[0].size = sizeof(inarg);
+        in.args[0].value = &inarg;
+        out.numargs = 1;
+        out.args[0].size = sizeof(outarg);
+        out.args[0].value = &outarg;
+	err = fc->dispatch(fc->fs_ptr, FUSE_LSEEK, &in, &out);
 	if (err) {
 		if (err == -ENOSYS) {
 			fc->no_lseek = 1;
@@ -2419,9 +2497,12 @@ long bento_do_ioctl(struct file *file, unsigned int cmd, unsigned long arg,
 	struct iovec *iov_page = NULL;
 	struct iovec *in_iov = NULL, *out_iov = NULL;
 	unsigned int in_iovs = 0, out_iovs = 0, num_pages = 0, max_pages;
-	size_t in_size, out_size, transferred, c;
+	size_t in_size, out_size, c;
+	ssize_t transferred = 0;
 	int err, i, j;
 	struct iov_iter ii;
+	struct bento_in in;
+	struct bento_out out;
 
 #if BITS_PER_LONG == 32
 	inarg.flags |= FUSE_IOCTL_32BIT;
@@ -2493,15 +2574,15 @@ long bento_do_ioctl(struct file *file, unsigned int cmd, unsigned long arg,
 	bento_page_descs_length_init(req, 0, req->num_pages);
 
 	/* okay, let's send it to the client */
-	req->in.h.opcode = FUSE_IOCTL;
-	req->in.h.nodeid = ff->nodeid;
-	req->in.numargs = 1;
-	req->in.args[0].size = sizeof(inarg);
-	req->in.args[0].value = &inarg;
+	in.h.opcode = FUSE_IOCTL;
+	in.h.nodeid = ff->nodeid;
+	in.numargs = 1;
+	in.args[0].size = sizeof(inarg);
+	in.args[0].value = &inarg;
 	if (in_size) {
-		req->in.numargs++;
-		req->in.args[1].size = in_size;
-		req->in.argpages = 1;
+		in.numargs++;
+		in.args[1].size = in_size;
+		in.argpages = 1;
 
 		err = -EFAULT;
 		iov_iter_init(&ii, WRITE, in_iov, in_iovs, in_size);
@@ -2512,12 +2593,11 @@ long bento_do_ioctl(struct file *file, unsigned int cmd, unsigned long arg,
 		}
 	}
 
-	req->out.numargs = 2;
-	req->out.args[0].size = sizeof(outarg);
-	req->out.args[0].value = &outarg;
-	req->out.args[1].size = out_size;
-	req->out.argpages = 1;
-	req->out.argvar = 1;
+	out.numargs = 2;
+	out.args[0].size = sizeof(outarg);
+	out.args[0].value = &outarg;
+	out.argpages = 1;
+	out.argvar = 1;
 
 	for (j = 0; j < req->num_pages; j++) {
 		// TODO: get ioctl actually working
@@ -2525,10 +2605,11 @@ long bento_do_ioctl(struct file *file, unsigned int cmd, unsigned long arg,
 		send_buf.ptr = (void *) req->pages[j];
 		send_buf.bufsize = PAGE_SIZE;
 		send_buf.drop = false;
-		err = fc->fs_ops->ioctl(file_inode(file)->i_sb, ff->nodeid,
-				&inarg, &outarg, &send_buf);
+		out.args[1].size = PAGE_SIZE;
+		out.args[1].value = &send_buf;
+		err = fc->dispatch(fc->fs_ptr, FUSE_IOCTL, &in, &out);
+		transferred += out.args[1].size;
 	}
-	transferred = req->out.args[1].size;
 	bento_put_request(fc, req);
 	req = NULL;
 	if (err)
@@ -2685,6 +2766,8 @@ unsigned bento_file_poll(struct file *file, poll_table *wait)
 	struct bento_conn *fc = ff->fc;
 	struct fuse_poll_in inarg = { .fh = ff->fh, .kh = ff->kh };
 	struct fuse_poll_out outarg;
+	struct bento_in in;
+	struct bento_out out;
 	int err;
 
 	if (fc->no_poll)
@@ -2702,7 +2785,15 @@ unsigned bento_file_poll(struct file *file, poll_table *wait)
 		bento_register_polled_file(fc, ff);
 	}
 
-	err = fc->fs_ops->poll(fc->sb, ff->nodeid, &inarg, &outarg);
+	in.h.opcode = FUSE_POLL;
+        in.h.nodeid = ff->nodeid;
+        in.numargs = 1;
+        in.args[0].size = sizeof(inarg);
+        in.args[0].value = &inarg;
+        out.numargs = 1;
+        out.args[0].size = sizeof(outarg);
+        out.args[0].value = &outarg;
+	err = fc->dispatch(fc->fs_ptr, FUSE_POLL, &in, &out);
 
 	if (!err)
 		return outarg.revents;
@@ -2821,6 +2912,8 @@ static long bento_file_fallocate(struct file *file, int mode, loff_t offset,
 		.length = length,
 		.mode = mode
 	};
+	struct bento_in in;
+	struct bento_out out;
 	int err;
 	bool lock_inode = !(mode & FALLOC_FL_KEEP_SIZE) ||
 			   (mode & FALLOC_FL_PUNCH_HOLE);
@@ -2847,7 +2940,12 @@ static long bento_file_fallocate(struct file *file, int mode, loff_t offset,
 	if (!(mode & FALLOC_FL_KEEP_SIZE))
 		set_bit(BENTO_I_SIZE_UNSTABLE, &fi->state);
 
-	err = fc->fs_ops->fallocate(fc->sb, ff->nodeid, &inarg);
+	in.h.opcode = FUSE_FALLOCATE;
+        in.h.nodeid = ff->nodeid;
+        in.numargs = 1;
+        in.args[0].size = sizeof(inarg);
+        in.args[0].value = &inarg;
+	err = fc->dispatch(fc->fs_ptr, FUSE_FALLOCATE, &in, &out);
 	if (err == -ENOSYS) {
 		fc->no_fallocate = 1;
 		err = -EOPNOTSUPP;

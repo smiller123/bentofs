@@ -54,6 +54,7 @@ struct bento_mount_data {
 	unsigned max_read;
 	unsigned blksize;
 	char *name;
+	char *devname;
 };
 
 struct bento_forget_link *bento_alloc_forget(void)
@@ -361,7 +362,7 @@ static void bento_send_destroy(struct bento_conn *fc)
 	struct bento_req *req = fc->destroy_req;
 	if (req && fc->conn_init) {
 		fc->destroy_req = NULL;
-		fc->fs_ops->destroy(fc->sb);
+		fc->dispatch(fc->fs_ptr, FUSE_DESTROY, &req->in, &req->out);
 		bento_put_request(fc, req);
 	}
 }
@@ -399,6 +400,8 @@ static int bento_statfs(struct dentry *dentry, struct kstatfs *buf)
 	struct super_block *sb = dentry->d_sb;
 	struct bento_conn *fc = get_bento_conn_super(sb);
 	struct fuse_statfs_out outarg;
+	struct bento_in in;
+	struct bento_out out;
 	int err;
 
 	if (!bento_allow_current_process(fc)) {
@@ -407,8 +410,13 @@ static int bento_statfs(struct dentry *dentry, struct kstatfs *buf)
 	}
 
 	memset(&outarg, 0, sizeof(outarg));
-	err = fc->fs_ops->statfs(d_inode(dentry)->i_sb,
-			get_node_id(d_inode(dentry)), &outarg);
+	in.numargs = 0;
+        in.h.opcode = FUSE_STATFS;
+        in.h.nodeid = get_node_id(d_inode(dentry));
+        out.numargs = 1;
+        out.args[0].size = sizeof(outarg);
+        out.args[0].value = &outarg;
+	err = fc->dispatch(fc->fs_ptr, FUSE_STATFS, &in, &out);
 	if (!err)
 		convert_bento_statfs(buf, &outarg.st);
 	return err;
@@ -417,6 +425,7 @@ static int bento_statfs(struct dentry *dentry, struct kstatfs *buf)
 enum {
 	OPT_FD,
 	OPT_NAME,
+	OPT_DEVNAME,
 	OPT_ROOTMODE,
 	OPT_USER_ID,
 	OPT_GROUP_ID,
@@ -430,6 +439,7 @@ enum {
 static const match_table_t tokens = {
 	{OPT_FD,			"fd=%u"},
 	{OPT_NAME,			"name=%s"},
+	{OPT_DEVNAME,			"devname=%s"},
 	{OPT_ROOTMODE,			"rootmode=%o"},
 	{OPT_USER_ID,			"user_id=%u"},
 	{OPT_GROUP_ID,			"group_id=%u"},
@@ -477,6 +487,10 @@ static int parse_bento_opt(char *opt, struct bento_mount_data *d, int is_bdev)
 
 		case OPT_NAME:
 			d->name = match_strdup(&args[0]);
+			break;
+
+		case OPT_DEVNAME:
+			d->devname = match_strdup(&args[0]);
 			break;
 
 		case OPT_ROOTMODE:
@@ -836,9 +850,10 @@ static void process_init_reply(struct bento_conn *fc, struct bento_req *req)
 	wake_up_all(&fc->blocked_waitq);
 }
 
-static void bento_send_init(struct bento_conn *fc, struct bento_req *req)
+static void bento_send_init(struct bento_conn *fc, const char *devname,
+		struct bento_req *req)
 {
-	struct fuse_init_in *arg = &req->misc.init_in;
+	struct bento_init_in *arg = &req->misc.init_in;
 
 	arg->major = BENTO_KERNEL_VERSION;
 	arg->minor = BENTO_KERNEL_MINOR_VERSION;
@@ -850,6 +865,7 @@ static void bento_send_init(struct bento_conn *fc, struct bento_req *req)
 		FUSE_DO_READDIRPLUS | FUSE_READDIRPLUS_AUTO | FUSE_ASYNC_DIO |
 		FUSE_WRITEBACK_CACHE | FUSE_NO_OPEN_SUPPORT |
 		FUSE_PARALLEL_DIROPS | FUSE_HANDLE_KILLPRIV | FUSE_POSIX_ACL;
+	arg->devname = devname;
 	req->in.h.opcode = FUSE_INIT;
 	req->in.numargs = 1;
 	req->in.args[0].size = sizeof(*arg);
@@ -861,7 +877,7 @@ static void bento_send_init(struct bento_conn *fc, struct bento_req *req)
 	req->out.argvar = 1;
 	req->out.args[0].size = sizeof(struct fuse_init_out);
 	req->out.args[0].value = &req->misc.init_out;
-	fc->fs_ops->init(fc->sb, arg, &req->misc.init_out);
+	fc->dispatch(fc->fs_ptr, FUSE_INIT, &req->in, &req->out);
 	process_init_reply(fc, req);
 }
 
@@ -945,8 +961,10 @@ static int bento_fill_super(struct super_block *sb, void *data, int silent)
 	fs_type = find_bento_fs(d.name, strlen(d.name));
 	if (!*fs_type)
 		goto err_put_conn;
-	else
-		fc->fs_ops = (*fs_type)->fs_ops;
+	else {
+		fc->fs_ptr = (*fs_type)->fs;
+		fc->dispatch = (*fs_type)->dispatch;
+	}
 	read_unlock(&bento_fs_lock);
 
 	/* Used by get_root_inode() */
@@ -983,7 +1001,7 @@ static int bento_fill_super(struct super_block *sb, void *data, int silent)
 	 * CPUs after this
 	 */
 
-	bento_send_init(fc, init_req);
+	bento_send_init(fc, d.devname, init_req);
 
 	return 0;
 
@@ -997,15 +1015,16 @@ static int bento_fill_super(struct super_block *sb, void *data, int silent)
 	return err;
 }
 
-int register_bento_fs(char *fs_name, struct bento_ops *ops)
+int register_bento_fs(const void* fs, char *fs_name, const void* dispatch)
 {
 	int res = 0;
 	struct bento_fs_type ** p;
 	struct bento_fs_type *fs_type;
 
         fs_type = kzalloc(sizeof(struct bento_fs_type), GFP_KERNEL);
+	fs_type->fs = fs;
 	fs_type->name = fs_name;
-	fs_type->fs_ops = ops;
+	fs_type->dispatch = dispatch;
 	fs_type->next = NULL;
 
 	BUG_ON(strchr(fs_type->name, '.'));
@@ -1080,7 +1099,14 @@ static struct dentry *bento_mount_blk(struct file_system_type *fs_type,
 			   int flags, const char *dev_name,
 			   void *raw_data)
 {
-	return mount_bdev(fs_type, flags, dev_name, raw_data, bento_fill_super);
+	struct dentry *retval;
+	char *opts = kmalloc(strlen((char *) raw_data) + strlen(dev_name) + 10, GFP_KERNEL);
+	strcpy(opts, raw_data);
+	strcat(opts, ",devname=");
+	strcat(opts, dev_name);
+	retval = mount_bdev(fs_type, flags, dev_name, opts, bento_fill_super);
+	kfree(opts);
+	return retval;
 }
 
 static void bento_kill_sb_blk(struct super_block *sb)
