@@ -298,6 +298,14 @@ enum bento_req_flag {
 	FR_PRIVATE,
 };
 
+struct bento_init_in {
+	uint32_t	major;
+	uint32_t	minor;
+	uint32_t	max_readahead;
+	uint32_t	flags;
+	const char	*devname;
+};
+
 /**
  * A request to the client
  *
@@ -337,7 +345,7 @@ struct bento_req {
 			struct fuse_release_in in;
 			struct inode *inode;
 		} release;
-		struct fuse_init_in init_in;
+		struct bento_init_in init_in;
 		struct fuse_init_out init_out;
 		struct cuse_init_in cuse_init_in;
 		struct {
@@ -424,83 +432,18 @@ struct bento_buffer {
 
 struct bento_fs_type {
 	const char *name;
-	const struct bento_ops *fs_ops;
+	const void *fs;
+	const void *dispatch;
 	struct bento_fs_type *next;
 };
 
-/**
- * Fuse lowlevel operations.
- *
- * These functions are implemented by the specific file system.
- */
-struct bento_ops {
-	int (*init) (struct super_block *, struct fuse_init_in *,
-			struct fuse_init_out *);
-	int (*destroy) (struct super_block *);
-	int (*lookup)(struct super_block *, uint64_t, const char *,
-			struct fuse_entry_out *);
-	int (*forget)(struct super_block *, uint64_t, uint64_t);
-	int (*getattr)(struct super_block *, uint64_t,
-			struct fuse_getattr_in *,
-			struct fuse_attr_out *);
-	int (*setattr)(struct super_block *, uint64_t,
-			struct fuse_setattr_in *,
-			struct fuse_attr_out *);
-	int (*readlink)(struct super_block *, uint64_t, struct bento_buffer *);
-	int (*mknod)(struct super_block *, uint64_t, struct fuse_mknod_in *,
-			const char *, struct fuse_entry_out *);
-	int (*mkdir)(struct super_block *, uint64_t, struct fuse_mkdir_in *,
-			const char *, struct fuse_entry_out *);
-	int (*unlink)(struct super_block *, uint64_t, const char *);
-	int (*rmdir)(struct super_block *, uint64_t, const char *);
-	int (*symlink)(struct super_block *, uint64_t, const char *,
-			const char *, struct fuse_entry_out *);
-	int (*rename)(struct super_block *, uint64_t, struct fuse_rename2_in *,
-			const char *, const char *);
-	int (*open)(struct super_block *, uint64_t, struct fuse_open_in *,
-			struct fuse_open_out *);
-	int (*read)(struct super_block *, uint64_t, struct fuse_read_in *,
-			struct bento_buffer *);
-	int (*write)(struct super_block *, uint64_t, struct fuse_write_in *,
-			struct bento_buffer *, struct fuse_write_out *);
-	int (*flush)(struct super_block *, uint64_t, struct fuse_flush_in *);
-	int (*release)(struct super_block *, uint64_t, struct fuse_release_in *);
-	int (*fsync)(struct super_block *, uint64_t, struct fuse_fsync_in *);
-	int (*opendir)(struct super_block *, uint64_t, struct fuse_open_in *,
-			struct fuse_open_out *);
-	int (*readdir)(struct super_block *, uint64_t, struct fuse_read_in *,
-			struct bento_buffer *, size_t *);
-	int (*releasedir)(struct super_block *, uint64_t, struct fuse_release_in *);
-	int (*fsyncdir)(struct super_block *, uint64_t, struct fuse_fsync_in *);
-	int (*statfs)(struct super_block *, uint64_t, struct fuse_statfs_out *);
-	int (*setxattr)(struct super_block *, uint64_t, struct fuse_setxattr_in *,
-			const char *, struct bento_buffer *);
-	int (*getxattr)(struct super_block *, uint64_t,
-			struct fuse_getxattr_in *, const char *, size_t,
-			struct fuse_getxattr_out *, struct bento_buffer *);
-	int (*listxattr)(struct super_block *, uint64_t, struct fuse_getxattr_in *,
-			size_t, struct fuse_getxattr_out *,
-			struct bento_buffer *);
-	int (*removexattr)(struct super_block *, uint64_t, const char *);
-	int (*access)(struct super_block *, uint64_t, struct fuse_access_in *);
-	int (*create)(struct super_block *, uint64_t, struct fuse_create_in *,
-			const char *, struct fuse_entry_out *,
-			struct fuse_open_out *);
-	int (*getlk)(struct super_block *, uint64_t, struct fuse_lk_in *,
-			struct fuse_lk_out *);
-	int (*setlk)(struct super_block *, uint64_t, struct fuse_lk_in *,
-			bool sleep);
-	int (*bmap)(struct super_block *, uint64_t, struct fuse_bmap_in *,
-			struct fuse_bmap_out *);
-	int (*ioctl)(struct super_block *, uint64_t, struct fuse_ioctl_in *,
-			struct fuse_ioctl_out *, struct bento_buffer *);
-	int (*poll)(struct super_block *, uint64_t, struct fuse_poll_in *,
-			struct fuse_poll_out *);
-	int (*fallocate)(struct super_block *, uint64_t,
-			struct fuse_fallocate_in *);
-	int (*lseek)(struct super_block *, uint64_t, struct fuse_lseek_in *,
-			struct fuse_lseek_out *);
-};
+//struct bento_init_in {
+//	uint32_t	major;
+//	uint32_t	minor;
+//	uint32_t	max_readahead;
+//	uint32_t	flags;
+//	const char *devname;
+//};
 
 /**
  * A Fuse connection.
@@ -718,7 +661,10 @@ struct bento_conn {
 	/** Read/write semaphore to hold when accessing sb. */
 	struct rw_semaphore killsb;
 
-	const struct bento_ops *fs_ops;
+	const void *fs_ptr;
+
+	int (*dispatch) (const void *, uint32_t, struct bento_in *,
+			struct bento_out *);
 
 	/** List of device instances belonging to this connection */
 	struct list_head devices;
@@ -776,7 +722,9 @@ struct bento_forget_link *bento_alloc_forget(void);
 /**
  * Initialize READ or READDIR request
  */
-void bento_read_fill(struct bento_req *req, struct file *file,
+void bento_read_fill(struct bento_in *in, struct bento_out *out, struct fuse_read_in *inarg,
+                    struct bento_buffer* buf, struct file *file, loff_t pos, size_t count, int opcode);
+void bento_read_fill_old(struct bento_req *req, struct file *file,
 		    loff_t pos, size_t count, int opcode);
 
 /**

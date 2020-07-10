@@ -20,6 +20,8 @@ int bento_setxattr(struct inode *inode, const char *name, const void *value,
 	struct fuse_setxattr_in inarg;
 	int err;
 	struct bento_buffer buf;
+	struct bento_in in;
+	struct bento_out out;
 
 	if (fc->no_setxattr)
 		return -EOPNOTSUPP;
@@ -31,7 +33,17 @@ int bento_setxattr(struct inode *inode, const char *name, const void *value,
 	buf.ptr = value;
 	buf.bufsize = size;
 	buf.drop = false;
-	err = fc->fs_ops->setxattr(inode->i_sb, get_node_id(inode), &inarg, name, &buf);
+
+        in.h.opcode = FUSE_SETXATTR;
+        in.h.nodeid = get_node_id(inode);
+        in.numargs = 3;
+        in.args[0].size = sizeof(inarg);
+        in.args[0].value = &inarg;
+        in.args[1].size = strlen(name) + 1;
+        in.args[1].value = name;
+        in.args[2].size = size;
+        in.args[2].value = &buf;
+	err = fc->dispatch(fc->fs_ptr, FUSE_SETXATTR, &in, &out);
 	if (err == -ENOSYS) {
 		fc->no_setxattr = 1;
 		err = -EOPNOTSUPP;
@@ -47,39 +59,39 @@ ssize_t bento_getxattr(struct inode *inode, const char *name, void *value,
 		      size_t size)
 {
 	struct bento_conn *fc = get_bento_conn(inode);
-	BENTO_ARGS(args);
 	struct fuse_getxattr_in inarg;
 	struct fuse_getxattr_out outarg;
 	struct bento_buffer buf;
 	ssize_t ret;
+	struct bento_in in;
+	struct bento_out out;
 
 	if (fc->no_getxattr)
 		return -EOPNOTSUPP;
 
 	memset(&inarg, 0, sizeof(inarg));
 	inarg.size = size;
-	args.in.h.opcode = FUSE_GETXATTR;
-	args.in.h.nodeid = get_node_id(inode);
-	args.in.numargs = 2;
-	args.in.args[0].size = sizeof(inarg);
-	args.in.args[0].value = &inarg;
-	args.in.args[1].size = strlen(name) + 1;
-	args.in.args[1].value = name;
+	in.h.opcode = FUSE_GETXATTR;
+	in.h.nodeid = get_node_id(inode);
+	in.numargs = 2;
+	in.args[0].size = sizeof(inarg);
+	in.args[0].value = &inarg;
+	in.args[1].size = strlen(name) + 1;
+	in.args[1].value = name;
 	/* This is really two different operations rolled into one */
-	args.out.numargs = 1;
-	if (size) {
-		args.out.argvar = 1;
-		args.out.args[0].size = size;
-		args.out.args[0].value = value;
-	} else {
-		args.out.args[0].size = sizeof(outarg);
-		args.out.args[0].value = &outarg;
-	}
+	out.numargs = 1;
 	buf.ptr = value;
 	buf.bufsize = size;
 	buf.drop = false;
-	ret = fc->fs_ops->getxattr(inode->i_sb, get_node_id(inode),
-			&inarg, name, size, &outarg, &buf);
+	if (size) {
+		out.argvar = 1;
+		out.args[0].size = size;
+		out.args[0].value = &buf;
+	} else {
+		out.args[0].size = sizeof(outarg);
+		out.args[0].value = &outarg;
+	}
+	ret = fc->dispatch(fc->fs_ptr, FUSE_GETXATTR, &in, &out);
 	if (!ret && !size)
 		ret = min_t(ssize_t, outarg.size, XATTR_SIZE_MAX);
 	if (ret == -ENOSYS) {
@@ -110,11 +122,12 @@ ssize_t bento_listxattr(struct dentry *entry, char *list, size_t size)
 {
 	struct inode *inode = d_inode(entry);
 	struct bento_conn *fc = get_bento_conn(inode);
-	BENTO_ARGS(args);
 	struct fuse_getxattr_in inarg;
 	struct fuse_getxattr_out outarg;
 	ssize_t ret;
 	struct bento_buffer buf;
+	struct bento_in in;
+	struct bento_out out;
 
 	if (!bento_allow_current_process(fc))
 		return -EACCES;
@@ -124,26 +137,25 @@ ssize_t bento_listxattr(struct dentry *entry, char *list, size_t size)
 
 	memset(&inarg, 0, sizeof(inarg));
 	inarg.size = size;
-	args.in.h.opcode = FUSE_LISTXATTR;
-	args.in.h.nodeid = get_node_id(inode);
-	args.in.numargs = 1;
-	args.in.args[0].size = sizeof(inarg);
-	args.in.args[0].value = &inarg;
+	in.h.opcode = FUSE_LISTXATTR;
+	in.h.nodeid = get_node_id(inode);
+	in.numargs = 1;
+	in.args[0].size = sizeof(inarg);
+	in.args[0].value = &inarg;
 	/* This is really two different operations rolled into one */
-	args.out.numargs = 1;
-	if (size) {
-		args.out.argvar = 1;
-		args.out.args[0].size = size;
-		args.out.args[0].value = list;
-	} else {
-		args.out.args[0].size = sizeof(outarg);
-		args.out.args[0].value = &outarg;
-	}
+	out.numargs = 1;
 	buf.ptr = list;
 	buf.bufsize = size;
 	buf.drop = false;
-	ret = fc->fs_ops->listxattr(inode->i_sb, get_node_id(inode),
-			&inarg, size, &outarg, &buf);
+	if (size) {
+		out.argvar = 1;
+		out.args[0].size = size;
+		out.args[0].value = &buf;
+	} else {
+		out.args[0].size = sizeof(outarg);
+		out.args[0].value = &outarg;
+	}
+	ret = fc->dispatch(fc->fs_ptr, FUSE_LISTXATTR, &in, &out);
 	if (!ret && !size)
 		ret = min_t(ssize_t, outarg.size, XATTR_LIST_MAX);
 	if (ret > 0 && size)
@@ -159,11 +171,18 @@ int bento_removexattr(struct inode *inode, const char *name)
 {
 	struct bento_conn *fc = get_bento_conn(inode);
 	int err;
+	struct bento_in in;
+	struct bento_out out;
 
 	if (fc->no_removexattr)
 		return -EOPNOTSUPP;
 
-	err = fc->fs_ops->removexattr(inode->i_sb, get_node_id(inode), name);
+	in.h.opcode = FUSE_REMOVEXATTR;
+        in.h.nodeid = get_node_id(inode);
+        in.numargs = 1;
+        in.args[0].size = strlen(name) + 1;
+        in.args[0].value = name;
+	err = fc->dispatch(fc->fs_ptr, FUSE_REMOVEXATTR, &in, &out);
 	if (err == -ENOSYS) {
 		fc->no_removexattr = 1;
 		err = -EOPNOTSUPP;

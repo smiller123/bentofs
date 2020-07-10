@@ -260,8 +260,19 @@ void bento_put_request(struct bento_conn *fc, struct bento_req *req)
 void bento_queue_forget(struct bento_conn *fc, struct bento_forget_link *forget,
 		       u64 nodeid, u64 nlookup)
 {
-	fc->fs_ops->forget(fc->sb, nodeid, nlookup);
+	struct bento_in inarg;
+	struct bento_out outarg;
+	struct fuse_forget_in forget_in = {
+		.nlookup = nlookup,
+	};
+	inarg.h.opcode = FUSE_FORGET;
+	inarg.h.nodeid = nodeid;
+	inarg.numargs = 1;
+	inarg.args[0].size = sizeof(struct fuse_forget_in);
+	inarg.args[0].value = &forget_in;
+	outarg.numargs = 0;
 
+	fc->dispatch(fc->fs_ptr, FUSE_FORGET, &inarg, &outarg);
 }
 
 /*
