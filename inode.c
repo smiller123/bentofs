@@ -984,11 +984,9 @@ static int bento_fill_super(struct super_block *sb, void *data, int silent)
 		goto err_put_root;
 	__set_bit(FR_BACKGROUND, &init_req->flags);
 
-	if (is_bdev) {
-		fc->destroy_req = bento_request_alloc(0);
-		if (!fc->destroy_req)
-			goto err_free_init_req;
-	}
+	fc->destroy_req = bento_request_alloc(0);
+	if (!fc->destroy_req)
+		goto err_free_init_req;
 
 	mutex_lock(&bento_mutex);
 
