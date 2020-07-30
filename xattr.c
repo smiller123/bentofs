@@ -43,7 +43,9 @@ int bento_setxattr(struct inode *inode, const char *name, const void *value,
         in.args[1].value = name;
         in.args[2].size = size;
         in.args[2].value = &buf;
+	down_read(&fc->fslock);
 	err = fc->dispatch(fc->fs_ptr, FUSE_SETXATTR, &in, &out);
+	up_read(&fc->fslock);
 	if (err == -ENOSYS) {
 		fc->no_setxattr = 1;
 		err = -EOPNOTSUPP;
@@ -91,7 +93,9 @@ ssize_t bento_getxattr(struct inode *inode, const char *name, void *value,
 		out.args[0].size = sizeof(outarg);
 		out.args[0].value = &outarg;
 	}
+	down_read(&fc->fslock);
 	ret = fc->dispatch(fc->fs_ptr, FUSE_GETXATTR, &in, &out);
+	up_read(&fc->fslock);
 	if (!ret && !size)
 		ret = min_t(ssize_t, outarg.size, XATTR_SIZE_MAX);
 	if (ret == -ENOSYS) {
@@ -155,7 +159,9 @@ ssize_t bento_listxattr(struct dentry *entry, char *list, size_t size)
 		out.args[0].size = sizeof(outarg);
 		out.args[0].value = &outarg;
 	}
+	down_read(&fc->fslock);
 	ret = fc->dispatch(fc->fs_ptr, FUSE_LISTXATTR, &in, &out);
+	up_read(&fc->fslock);
 	if (!ret && !size)
 		ret = min_t(ssize_t, outarg.size, XATTR_LIST_MAX);
 	if (ret > 0 && size)
@@ -182,7 +188,9 @@ int bento_removexattr(struct inode *inode, const char *name)
         in.numargs = 1;
         in.args[0].size = strlen(name) + 1;
         in.args[0].value = name;
+	down_read(&fc->fslock);
 	err = fc->dispatch(fc->fs_ptr, FUSE_REMOVEXATTR, &in, &out);
+	up_read(&fc->fslock);
 	if (err == -ENOSYS) {
 		fc->no_removexattr = 1;
 		err = -EOPNOTSUPP;

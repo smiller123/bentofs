@@ -198,7 +198,9 @@ static int bento_dentry_revalidate(struct dentry *entry, unsigned int flags)
 		parent = dget_parent(entry);
 		bento_lookup_init(fc, &inarg, &outarg, get_node_id(d_inode(parent)),
                                  &entry->d_name, &outentry);
+		down_read(&fc->fslock);
 		ret = fc->dispatch(fc->fs_ptr, FUSE_LOOKUP, &inarg, &outarg);
+		up_read(&fc->fslock);
 		dput(parent);
 		/* Zero nodeid is same as -ENOENT */
 		if (!ret && !outentry.nodeid)
@@ -294,7 +296,9 @@ int bento_lookup_name(struct super_block *sb, u64 nodeid, const struct qstr *nam
 	attr_version = bento_get_attr_version(fc);
 
 	bento_lookup_init(fc, &inarg, &outarg, nodeid, name, outentry);
+	down_read(&fc->fslock);
 	err = fc->dispatch(fc->fs_ptr, FUSE_LOOKUP, &inarg, &outarg);
+	up_read(&fc->fslock);
 	/* Zero nodeid is same as -ENOENT, but with valid timeout */
 	if (err || !outentry->nodeid)
 		goto out_put_forget;
@@ -419,7 +423,9 @@ static int bento_create_open(struct inode *dir, struct dentry *entry,
         out.args[0].value = &outentry;
         out.args[1].size = sizeof(outopen);
         out.args[1].value = &outopen;
+	down_read(&fc->fslock);
 	err = fc->dispatch(fc->fs_ptr, FUSE_CREATE, &in, &out);
+	up_read(&fc->fslock);
 	if (err)
 		goto out_free_ff;
 
@@ -534,9 +540,10 @@ static int create_new_entry(struct bento_conn *fc, struct bento_args *args,
         out.numargs = 1;
         out.args[0].size = sizeof(outarg);
         out.args[0].value = &outarg;
-
-    
+ 
+	down_read(&fc->fslock);
 	err = fc->dispatch(fc->fs_ptr, args->in.h.opcode, &in, &out);
+	up_read(&fc->fslock);
 	if (err)
 		goto out_put_forget_req;
 
@@ -654,7 +661,9 @@ static int bento_unlink(struct inode *dir, struct dentry *entry)
         in.args[0].size = entry->d_name.len + 1;
         in.args[0].value = entry->d_name.name;
 	out.numargs = 0;
+	down_read(&fc->fslock);
 	err = fc->dispatch(fc->fs_ptr, FUSE_UNLINK, &in, &out);
+	up_read(&fc->fslock);
 	if (!err) {
 		struct inode *inode = d_inode(entry);
 		struct bento_inode *fi = get_bento_inode(inode);
@@ -692,7 +701,9 @@ static int bento_rmdir(struct inode *dir, struct dentry *entry)
         in.args[0].value = entry->d_name.name;
 	out.numargs = 0;
 
+	down_read(&fc->fslock);
 	err = fc->dispatch(fc->fs_ptr, FUSE_RMDIR, &in, &out);
+	up_read(&fc->fslock);
 	if (!err) {
 		clear_nlink(d_inode(entry));
 		bento_invalidate_attr(dir);
@@ -725,7 +736,9 @@ static int bento_rename_common(struct inode *olddir, struct dentry *oldent,
         in.args[2].size = newent->d_name.len + 1;
         in.args[2].value = newent->d_name.name;
 
+	down_read(&fc->fslock);
 	err = fc->dispatch(fc->fs_ptr, opcode, &in, &out);
+	up_read(&fc->fslock);
 	if (!err) {
 		/* ctime changes */
 		bento_invalidate_attr(d_inode(oldent));
@@ -898,7 +911,9 @@ static int bento_do_getattr(struct inode *inode, struct kstat *stat,
         bento_outarg.numargs = 1;
         bento_outarg.args[0].size = sizeof(outarg);
         bento_outarg.args[0].value = &outarg;
+	down_read(&fc->fslock);
 	err = fc->dispatch(fc->fs_ptr, FUSE_GETATTR, &bento_inarg, &bento_outarg);
+	up_read(&fc->fslock);
 	if (!err) {
 		if ((inode->i_mode ^ outarg.attr.mode) & S_IFMT) {
 			make_bad_inode(inode);
@@ -1055,7 +1070,9 @@ static int bento_access(struct inode *inode, int mask)
         in.numargs = 1;
         in.args[0].size = sizeof(inarg);
         in.args[0].value = &inarg;
+	down_read(&fc->fslock);
 	err = fc->dispatch(fc->fs_ptr, FUSE_ACCESS, &in, &out);
+	up_read(&fc->fslock);
 	if (err == -ENOSYS) {
 		fc->no_access = 1;
 		err = 0;
@@ -1205,7 +1222,9 @@ static int bento_readdir(struct file *file, struct dir_context *ctx)
 	send_buf.bufsize = PAGE_SIZE;
 	send_buf.drop = false;
 	bento_read_fill(&in, &out, &inarg, &send_buf, file, ctx->pos, PAGE_SIZE, FUSE_READDIR);
+	down_read(&fc->fslock);
 	err = fc->dispatch(fc->fs_ptr, FUSE_READDIR, &in, &out);
+	up_read(&fc->fslock);
 	nbytes = out.args[0].size;
 	bento_unlock_inode(inode);
 	bento_request_free(req);
@@ -1250,7 +1269,9 @@ static const char *bento_get_link(struct dentry *dentry,
         out.args[0].size = PAGE_SIZE - 1;
 	out.args[0].value = &buf;
 
+	down_read(&fc->fslock);
 	ret = fc->dispatch(fc->fs_ptr, FUSE_READLINK, &in, &out);
+	up_read(&fc->fslock);
 	if (ret < 0) {
 		kfree(link);
 		link = ERR_PTR(ret);
@@ -1436,8 +1457,10 @@ int bento_flush_times(struct inode *inode, struct bento_file *ff)
         bento_outarg.numargs = 1;
         bento_outarg.args[0].size = sizeof(outarg);
         bento_outarg.args[0].value = &outarg;
+	down_read(&fc->fslock);
 	err = fc->dispatch(fc->fs_ptr, FUSE_SETATTR, &bento_inarg,
 			&bento_outarg);
+	up_read(&fc->fslock);
 	return err;
 }
 
@@ -1509,8 +1532,10 @@ int bento_do_setattr(struct dentry *dentry, struct iattr *attr,
         bento_outarg.numargs = 1;
         bento_outarg.args[0].size = sizeof(outarg);
         bento_outarg.args[0].value = &outarg;
+	down_read(&fc->fslock);
 	err = fc->dispatch(fc->fs_ptr, FUSE_SETATTR, &bento_inarg,
 			&bento_outarg);
+	up_read(&fc->fslock);
 	if (err) {
 		if (err == -EINTR)
 			bento_invalidate_attr(inode);

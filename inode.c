@@ -362,7 +362,9 @@ static void bento_send_destroy(struct bento_conn *fc)
 	struct bento_req *req = fc->destroy_req;
 	if (req && fc->conn_init) {
 		fc->destroy_req = NULL;
+		down_read(&fc->fslock);
 		fc->dispatch(fc->fs_ptr, FUSE_DESTROY, &req->in, &req->out);
+		up_read(&fc->fslock);
 		bento_put_request(fc, req);
 	}
 }
@@ -416,7 +418,9 @@ static int bento_statfs(struct dentry *dentry, struct kstatfs *buf)
         out.numargs = 1;
         out.args[0].size = sizeof(outarg);
         out.args[0].value = &outarg;
+	down_read(&fc->fslock);
 	err = fc->dispatch(fc->fs_ptr, FUSE_STATFS, &in, &out);
+	up_read(&fc->fslock);
 	if (!err)
 		convert_bento_statfs(buf, &outarg.st);
 	return err;
@@ -585,6 +589,7 @@ void bento_conn_init(struct bento_conn *fc)
 	memset(fc, 0, sizeof(*fc));
 	spin_lock_init(&fc->lock);
 	init_rwsem(&fc->killsb);
+	init_rwsem(&fc->fslock);
 	refcount_set(&fc->count, 1);
 	atomic_set(&fc->dev_count, 1);
 	init_waitqueue_head(&fc->blocked_waitq);
@@ -877,7 +882,9 @@ static void bento_send_init(struct bento_conn *fc, const char *devname,
 	req->out.argvar = 1;
 	req->out.args[0].size = sizeof(struct fuse_init_out);
 	req->out.args[0].value = &req->misc.init_out;
+	down_read(&fc->fslock);
 	fc->dispatch(fc->fs_ptr, FUSE_INIT, &req->in, &req->out);
+	up_read(&fc->fslock);
 	process_init_reply(fc, req);
 }
 
@@ -962,6 +969,7 @@ static int bento_fill_super(struct super_block *sb, void *data, int silent)
 	if (!*fs_type)
 		goto err_put_conn;
 	else {
+		//fc->fs_type = *fs_type;
 		fc->fs_ptr = (*fs_type)->fs;
 		fc->dispatch = (*fs_type)->dispatch;
 	}
@@ -1037,6 +1045,61 @@ int register_bento_fs(const void* fs, char *fs_name, const void* dispatch)
 	return res;
 }
 EXPORT_SYMBOL(register_bento_fs);
+
+int reregister_bento_fs(const void* fs, char *fs_name, const void* dispatch)
+{
+	int res = 0;
+	struct bento_fs_type ** p;
+	struct bento_fs_type *fs_type;
+	struct list_head *ptr;
+	struct bento_conn *conn;
+	struct super_block *sb;
+	void *state_ptr;
+	struct bento_in inarg;
+	struct bento_out outarg;
+
+	write_lock(&bento_fs_lock);
+	p = find_bento_fs(fs_name, strlen(fs_name));
+	fs_type = *p;
+	for (ptr = bento_conn_list.next; ptr != &bento_conn_list; ptr = ptr->next) {
+		conn = list_entry(ptr, struct bento_conn, entry);
+		if (conn->fs_ptr == fs_type->fs) {
+			sb = conn->sb;
+			break;
+		}
+	}
+	down_write(&conn->fslock);
+
+	inarg.numargs = 1;
+        inarg.h.opcode = BENTO_UPDATE_PREPARE;
+        inarg.h.nodeid = 0;
+        outarg.numargs = 1;
+	inarg.args[0].value = fs;
+	fs_type->dispatch(fs_type->fs, BENTO_UPDATE_PREPARE, &inarg, &outarg);
+	state_ptr = outarg.args[0].value;
+
+	fs_type->fs = fs;
+	fs_type->dispatch = dispatch;
+
+	memset(&inarg, 0, sizeof(inarg));
+	memset(&outarg, 0, sizeof(outarg));
+	inarg.numargs = 1;
+        inarg.h.opcode = BENTO_UPDATE_TRANSFER;
+        inarg.h.nodeid = 0;
+	inarg.args[0].size = sizeof(state_ptr);
+	inarg.args[0].value = state_ptr;
+        outarg.numargs = 0;
+	fs_type->dispatch(fs_type->fs, BENTO_UPDATE_TRANSFER, &inarg, &outarg);
+
+	conn->fs_ptr = fs;
+	conn->dispatch = dispatch;
+	fs_type->fs = fs;
+	fs_type->dispatch = dispatch;
+	up_write(&conn->fslock);
+	write_unlock(&bento_fs_lock);
+	return res;
+}
+EXPORT_SYMBOL(reregister_bento_fs);
 
 int unregister_bento_fs(char *fs_name)
 {
