@@ -272,7 +272,9 @@ void bento_queue_forget(struct bento_conn *fc, struct bento_forget_link *forget,
 	inarg.args[0].value = &forget_in;
 	outarg.numargs = 0;
 
+	down_read(&fc->fslock);
 	fc->dispatch(fc->fs_ptr, FUSE_FORGET, &inarg, &outarg);
+	up_read(&fc->fslock);
 }
 
 /*

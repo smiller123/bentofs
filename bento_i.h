@@ -48,6 +48,9 @@
 #define BENTO_KERNEL_VERSION 1
 #define BENTO_KERNEL_MINOR_VERSION 0
 
+#define BENTO_UPDATE_PREPARE 8192
+#define BENTO_UPDATE_TRANSFER 8193
+
 /** List of active connections */
 extern struct list_head bento_conn_list;
 
@@ -433,17 +436,10 @@ struct bento_buffer {
 struct bento_fs_type {
 	const char *name;
 	const void *fs;
-	const void *dispatch;
+	int (*dispatch) (const void *, uint32_t, struct bento_in *,
+			struct bento_out *);
 	struct bento_fs_type *next;
 };
-
-//struct bento_init_in {
-//	uint32_t	major;
-//	uint32_t	minor;
-//	uint32_t	max_readahead;
-//	uint32_t	flags;
-//	const char *devname;
-//};
 
 /**
  * A Fuse connection.
@@ -487,9 +483,6 @@ struct bento_conn {
 
 	/** rbtree of bento_files waiting for poll events indexed by ph */
 	struct rb_root polled_files;
-
-//	/** Number of background requests at which congestion starts */
-//	unsigned congestion_threshold;
 
 	/** The list of background requests set aside for later queuing */
 	struct list_head bg_queue;
@@ -660,6 +653,9 @@ struct bento_conn {
 
 	/** Read/write semaphore to hold when accessing sb. */
 	struct rw_semaphore killsb;
+
+	/** Read/write semaphore to hold when accessing the fs */
+	struct rw_semaphore fslock;
 
 	const void *fs_ptr;
 

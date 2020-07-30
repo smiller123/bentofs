@@ -21,6 +21,7 @@ static int bento_send_open(struct bento_conn *fc, u64 nodeid, struct file *file,
 	struct fuse_open_in inarg;
 	struct bento_in in;
 	struct bento_out out;
+	int ret;
 
 	memset(&inarg, 0, sizeof(inarg));
 
@@ -36,7 +37,10 @@ static int bento_send_open(struct bento_conn *fc, u64 nodeid, struct file *file,
         out.args[0].size = sizeof(*outargp);
         out.args[0].value = outargp;
 
-	return fc->dispatch(fc->fs_ptr, opcode, &in, &out);
+	down_read(&fc->fslock);
+	ret = fc->dispatch(fc->fs_ptr, opcode, &in, &out);
+	up_read(&fc->fslock);
+	return ret;
 }
 
 struct bento_file *bento_file_alloc(struct bento_conn *fc)
@@ -100,8 +104,10 @@ static void bento_file_put(struct bento_file *ff, bool sync)
 			in.numargs = req->in.numargs;
 			in.args[0].size = req->in.args[0].size;
 			in.args[0].value = req->in.args[0].value;
+			down_read(&ff->fc->fslock);
 			ff->fc->dispatch(ff->fc->fs_ptr, req->in.h.opcode,
 					&in, &out);
+			up_read(&ff->fc->fslock);
 			iput(req->misc.release.inode);
 			bento_put_request(ff->fc, req);
 		}
@@ -416,7 +422,9 @@ static int bento_flush(struct file *file, fl_owner_t id)
         in.args[0].value = &inarg;
 	memset(&out, 0, sizeof(out));
 
+	down_read(&fc->fslock);
 	err = fc->dispatch(fc->fs_ptr, FUSE_FLUSH, &in, &out);
+	up_read(&fc->fslock);
 	if (err == -ENOSYS) {
 		fc->no_flush = 1;
 		err = 0;
@@ -476,7 +484,9 @@ int bento_fsync_common(struct file *file, loff_t start, loff_t end,
         in.args[0].size = sizeof(inarg);
         in.args[0].value = &inarg;
 
+	down_read(&fc->fslock);
 	err = fc->dispatch(fc->fs_ptr, in.h.opcode, &in, &out);
+	up_read(&fc->fslock);
 	if (err == -ENOSYS) {
 		if (isdir)
 			fc->no_fsyncdir = 1;
@@ -581,7 +591,9 @@ static size_t bento_send_read(struct bento_req *req, struct bento_io_priv *io,
 		send_buf.bufsize = min(count, PAGE_SIZE);
 		send_buf.drop = false;
 		bento_read_fill(&in, &out, &inarg, &send_buf, file, pos, min(count, PAGE_SIZE), FUSE_READ);
+		down_read(&fc->fslock);
 		num_read = fc->dispatch(fc->fs_ptr, FUSE_READ, &in, &out);
+		up_read(&fc->fslock);
 		if (num_read != send_buf.bufsize) {
 			kunmap_atomic(send_buf.ptr);
 			break;
@@ -761,7 +773,9 @@ static void bento_send_readpages(struct bento_req *req, struct file *file)
 		send_buf.bufsize = PAGE_SIZE;
 		send_buf.drop = false;
 		bento_read_fill(&in, &out, &inarg, &send_buf, file, pos, PAGE_SIZE, FUSE_READ);
+		down_read(&fc->fslock);
 		num_read = fc->dispatch(fc->fs_ptr, FUSE_READ, &in, &out);
+		up_read(&fc->fslock);
 		if (num_read < 0) {
 			kunmap(req->pages[i]);
 			break;
@@ -940,7 +954,9 @@ static size_t bento_send_write(struct bento_req *req, struct bento_io_priv *io,
         	out.numargs = req->out.numargs;
         	out.args[0].size = req->out.args[0].size;
         	out.args[0].value = req->out.args[0].value;
+		down_read(&fc->fslock);
 		fc->dispatch(fc->fs_ptr, FUSE_WRITE, &in, &out);
+		up_read(&fc->fslock);
 		pos += page_length;
 
 		kunmap_atomic(page_buf);
@@ -1140,6 +1156,7 @@ static ssize_t bento_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	ssize_t err;
 	loff_t endbyte = 0;
 
+	// Prevent new writes during an update
 	if (get_bento_conn(inode)->writeback_cache) {
 		/* Update size (EOF optimization) and mode (SUID clearing) */
 		err = bento_update_attributes(mapping->host, file);
@@ -1483,7 +1500,9 @@ __acquires(fc->lock)
         	out.args[0].size = req->out.args[0].size;
         	out.args[0].value = req->out.args[0].value;
 		inarg->size = page_length;
+		down_read(&fc->fslock);
 		fc->dispatch(fc->fs_ptr, FUSE_WRITE, &in, &out);
+		up_read(&fc->fslock);
 		kunmap(req->pages[j]);
 
 		inarg->offset += page_length;
@@ -2159,7 +2178,9 @@ static int bento_getlk(struct file *file, struct file_lock *fl)
 	out.numargs = 1;
 	out.args[0].size = sizeof(outarg);
 	out.args[0].value = &outarg;
+	down_read(&fc->fslock);
 	err = fc->dispatch(fc->fs_ptr, FUSE_GETLK, &in, &out);
+	up_read(&fc->fslock);
 	if (!err)
 		err = convert_bento_file_lock(fc, &outarg.lk, fl);
 
@@ -2188,7 +2209,9 @@ static int bento_setlk(struct file *file, struct file_lock *fl, int flock)
 		return 0;
 
 	bento_lk_fill(&in, file, fl, opcode, pid_nr, flock, &inarg);
+	down_read(&fc->fslock);
 	err = fc->dispatch(fc->fs_ptr, opcode, &in, &out);
+	up_read(&fc->fslock);
 
 	/* locking is restartable */
 	if (err == -EINTR)
@@ -2263,7 +2286,9 @@ static sector_t bento_bmap(struct address_space *mapping, sector_t block)
         out.numargs = 1;
         out.args[0].size = sizeof(outarg);
         out.args[0].value = &outarg;
+	down_read(&fc->fslock);
 	err = fc->dispatch(fc->fs_ptr, FUSE_BMAP, &in, &out);
+	up_read(&fc->fslock);
 	if (err == -ENOSYS)
 		fc->no_bmap = 1;
 
@@ -2296,7 +2321,9 @@ static loff_t bento_lseek(struct file *file, loff_t offset, int whence)
         out.numargs = 1;
         out.args[0].size = sizeof(outarg);
         out.args[0].value = &outarg;
+	down_read(&fc->fslock);
 	err = fc->dispatch(fc->fs_ptr, FUSE_LSEEK, &in, &out);
+	up_read(&fc->fslock);
 	if (err) {
 		if (err == -ENOSYS) {
 			fc->no_lseek = 1;
@@ -2607,7 +2634,9 @@ long bento_do_ioctl(struct file *file, unsigned int cmd, unsigned long arg,
 		send_buf.drop = false;
 		out.args[1].size = PAGE_SIZE;
 		out.args[1].value = &send_buf;
+		down_read(&fc->fslock);
 		err = fc->dispatch(fc->fs_ptr, FUSE_IOCTL, &in, &out);
+		up_read(&fc->fslock);
 		transferred += out.args[1].size;
 	}
 	bento_put_request(fc, req);
@@ -2793,7 +2822,9 @@ unsigned bento_file_poll(struct file *file, poll_table *wait)
         out.numargs = 1;
         out.args[0].size = sizeof(outarg);
         out.args[0].value = &outarg;
+	down_read(&fc->fslock);
 	err = fc->dispatch(fc->fs_ptr, FUSE_POLL, &in, &out);
+	up_read(&fc->fslock);
 
 	if (!err)
 		return outarg.revents;
@@ -2945,7 +2976,9 @@ static long bento_file_fallocate(struct file *file, int mode, loff_t offset,
         in.numargs = 1;
         in.args[0].size = sizeof(inarg);
         in.args[0].value = &inarg;
+	down_read(&fc->fslock);
 	err = fc->dispatch(fc->fs_ptr, FUSE_FALLOCATE, &in, &out);
+	up_read(&fc->fslock);
 	if (err == -ENOSYS) {
 		fc->no_fallocate = 1;
 		err = -EOPNOTSUPP;
