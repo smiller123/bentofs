@@ -847,7 +847,7 @@ static void process_init_reply(struct bento_conn *fc, struct bento_req *req)
 		fc->sb->s_bdi->ra_pages =
 				min(fc->sb->s_bdi->ra_pages, ra_pages);
 		fc->minor = arg->minor;
-		fc->max_write = arg->minor < 5 ? 4096 : arg->max_write;
+		fc->max_write = arg->max_write;
 		fc->max_write = max_t(unsigned, 4096, fc->max_write);
 		fc->conn_init = 1;
 	}
