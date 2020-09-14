@@ -1069,6 +1069,23 @@ int reregister_bento_fs(const void* fs, char *fs_name, const void* dispatch)
 		}
 	}
 	down_write(&conn->fslock);
+	// Reset no_ops in case the new version implements more functions
+	conn->no_open = 0;
+	conn->no_fsync = 0;
+	conn->no_fsyncdir = 0;
+	conn->no_flush = 0;
+	conn->no_setxattr = 0;
+	conn->no_getxattr = 0;
+	conn->no_listxattr = 0;
+	conn->no_removexattr = 0;
+	conn->no_lock = 0;
+	conn->no_access = 0;
+	conn->no_create = 0;
+	conn->no_interrupt = 0;
+	conn->no_bmap = 0;
+	conn->no_poll = 0;
+	conn->no_flock = 0;
+
 
 	inarg.numargs = 1;
         inarg.h.opcode = BENTO_UPDATE_PREPARE;
