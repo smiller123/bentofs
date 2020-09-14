@@ -519,6 +519,7 @@ static int create_new_entry(struct bento_conn *fc, struct bento_args *args,
 {
 	struct fuse_entry_out outarg;
 	struct inode *inode;
+	struct dentry *d;
 	struct bento_forget_link *forget;
 	int err = 0;
 	struct bento_in in;
@@ -558,20 +559,28 @@ static int create_new_entry(struct bento_conn *fc, struct bento_args *args,
 			  &outarg.attr, entry_attr_timeout(&outarg), 0);
 	if (!inode) {
 		bento_queue_forget(fc, forget, outarg.nodeid, 1);
+		printk(KERN_INFO "create new entry error ENOMEM\n");
 		return -ENOMEM;
 	}
 	kfree(forget);
 
-	err = d_instantiate_no_diralias(entry, inode);
-	if (err)
-		return err;
+	d_drop(entry);
+	d = d_splice_alias(inode, entry);
+	if (IS_ERR(d))
+		return PTR_ERR(d);
 
-	bento_change_entry_timeout(entry, &outarg);
+	if (d) {
+		bento_change_entry_timeout(d, &outarg);
+		dput(d);
+	} else {
+		bento_change_entry_timeout(entry, &outarg);
+	}
 	bento_invalidate_attr(dir);
 	return 0;
 
  out_put_forget_req:
 	kfree(forget);
+	printk(KERN_INFO "create new entry error %u\n", err);
 	return err;
 }
 
