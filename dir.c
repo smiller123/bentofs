@@ -555,11 +555,10 @@ static int create_new_entry(struct bento_conn *fc, struct bento_args *args,
 	if ((outarg.attr.mode ^ mode) & S_IFMT)
 		goto out_put_forget_req;
 
-	inode = bento_iget(dir->i_sb, outarg.nodeid, outarg.generation,
+	inode = bento_iget_new(dir->i_sb, outarg.nodeid, outarg.generation,
 			  &outarg.attr, entry_attr_timeout(&outarg), 0);
 	if (!inode) {
 		bento_queue_forget(fc, forget, outarg.nodeid, 1);
-		printk(KERN_INFO "create new entry error ENOMEM\n");
 		return -ENOMEM;
 	}
 	kfree(forget);
@@ -580,7 +579,6 @@ static int create_new_entry(struct bento_conn *fc, struct bento_args *args,
 
  out_put_forget_req:
 	kfree(forget);
-	printk(KERN_INFO "create new entry error %u\n", err);
 	return err;
 }
 

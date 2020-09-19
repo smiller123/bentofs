@@ -278,6 +278,35 @@ static int bento_inode_set(struct inode *inode, void *_nodeidp)
 	return 0;
 }
 
+struct inode *bento_iget_new(struct super_block *sb, u64 nodeid,
+			int generation, struct fuse_attr *attr,
+			u64 attr_valid, u64 attr_version)
+{
+	struct inode *inode;
+	struct bento_inode *fi;
+	struct bento_conn *fc = get_bento_conn_super(sb);
+
+	inode = new_inode(sb);
+	inode->i_ino = nodeid;
+	get_bento_inode(inode)->nodeid = nodeid;
+	if (!inode)
+		return NULL;
+
+	inode->i_flags |= S_NOATIME;
+	if (!fc->writeback_cache || !S_ISREG(attr->mode))
+		inode->i_flags |= S_NOCMTIME;
+	inode->i_generation = generation;
+	bento_init_inode(inode, attr);
+
+	fi = get_bento_inode(inode);
+	spin_lock(&fc->lock);
+	fi->nlookup++;
+	spin_unlock(&fc->lock);
+	bento_change_attributes(inode, attr, attr_valid, attr_version);
+
+	return inode;
+}
+
 struct inode *bento_iget(struct super_block *sb, u64 nodeid,
 			int generation, struct fuse_attr *attr,
 			u64 attr_valid, u64 attr_version)

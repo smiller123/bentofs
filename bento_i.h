@@ -704,6 +704,13 @@ struct inode *bento_iget(struct super_block *sb, u64 nodeid,
 			int generation, struct fuse_attr *attr,
 			u64 attr_valid, u64 attr_version);
 
+/**
+ * Get a new inode and fill it
+ */
+struct inode *bento_iget_new(struct super_block *sb, u64 nodeid,
+			int generation, struct fuse_attr *attr,
+			u64 attr_valid, u64 attr_version);
+
 int bento_lookup_name(struct super_block *sb, u64 nodeid, const struct qstr *name,
 		     struct fuse_entry_out *outarg, struct inode **inode);
 
