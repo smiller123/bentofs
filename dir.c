@@ -571,9 +571,6 @@ static int create_new_entry(struct bento_conn *fc, struct bento_args *args,
 
 	if (d) {
 		bento_change_entry_timeout(d, &outarg);
-		// makes it so directory is usable after process with open fd on old dir exits or closes fd
-		// seems like a bad fix since the d dirent was just returned, this might be better to do when refcount goes to 0
-		bento_invalidate_entry(d);
 		dput(d);
 	} else {
 		bento_change_entry_timeout(entry, &outarg);
