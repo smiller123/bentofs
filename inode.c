@@ -549,7 +549,7 @@ static int parse_bento_opt(char *opt, struct bento_mount_data *d, int is_bdev)
 		}
 	}
 
-	if (!d->fd_present || !d->rootmode_present ||
+	if (!d->rootmode_present ||
 	    !d->user_id_present || !d->group_id_present)
 		return 0;
 
