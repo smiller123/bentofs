@@ -594,7 +594,7 @@ static size_t bento_send_read(struct bento_req *req, struct bento_io_priv *io,
 		down_read(&fc->fslock);
 		num_read = fc->dispatch(fc->fs_ptr, FUSE_READ, &in, &out);
 		up_read(&fc->fslock);
-		if (num_read != send_buf.bufsize) {
+		if (!num_read) {
 			kunmap_atomic(send_buf.ptr);
 			break;
 		}
@@ -1459,6 +1459,7 @@ __acquires(fc->lock)
 	struct fuse_write_in *inarg = &req->misc.write.in;
 	__u64 data_size = req->num_pages * PAGE_SIZE;
         size_t written = 0;
+	size_t write_size;
 	int j;
 
 	if (!fc->connected)
@@ -1474,6 +1475,7 @@ __acquires(fc->lock)
 	}
 
 	req->in.args[1].size = inarg->size;
+	write_size = inarg->size;
 	fi->writectr++;
 
         spin_unlock(&fc->lock);
@@ -1483,7 +1485,7 @@ __acquires(fc->lock)
 		struct bento_out out;
         	struct bento_buffer buf;
 		unsigned int page_off = req->page_descs[j].offset;
-		unsigned int page_length = req->page_descs[j].length;
+		unsigned int page_length = min((size_t) req->page_descs[j].length, write_size - written);
 
 		buf.ptr = kmap(req->pages[j]) + page_off;
         	buf.bufsize = page_length;
