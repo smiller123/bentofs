@@ -966,10 +966,10 @@ static int bento_fill_super(struct super_block *sb, void *data, int silent)
 
 	read_lock(&bento_fs_lock);
 	fs_type = find_bento_fs(d.name, strlen(d.name));
-	if (!*fs_type)
+	if (!*fs_type) {
+		read_unlock(&bento_fs_lock);
 		goto err_put_conn;
-	else {
-		//fc->fs_type = *fs_type;
+	} else {
 		fc->fs_ptr = (*fs_type)->fs;
 		fc->dispatch = (*fs_type)->dispatch;
 	}
