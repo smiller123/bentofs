@@ -160,7 +160,10 @@ void bento_change_attributes_common(struct inode *inode, struct fuse_attr *attr,
 	inode->i_atime.tv_sec   = attr->atime;
 	inode->i_atime.tv_nsec  = attr->atimensec;
 	/* mtime from server may be stale due to local buffered write */
-	if (!fc->writeback_cache || !S_ISREG(inode->i_mode)) {
+	if (!fc->writeback_cache || !S_ISREG(inode->i_mode) ||
+			(attr->mtime > inode->i_mtime.tv_sec ||
+			 (attr->mtime == inode->i_mtime.tv_sec &&
+			  attr->mtimensec > inode->i_mtime.tv_nsec))) {
 		inode->i_mtime.tv_sec   = attr->mtime;
 		inode->i_mtime.tv_nsec  = attr->mtimensec;
 		inode->i_ctime.tv_sec   = attr->ctime;
