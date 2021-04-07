@@ -376,7 +376,7 @@ static struct dentry *bento_lookup(struct inode *dir, struct dentry *entry,
  */
 static int bento_create_open(struct inode *dir, struct dentry *entry,
 			    struct file *file, unsigned flags,
-			    umode_t mode, int *opened)
+			    umode_t mode)
 {
 	int err;
 	struct inode *inode;
@@ -449,7 +449,7 @@ static int bento_create_open(struct inode *dir, struct dentry *entry,
 	d_instantiate(entry, inode);
 	bento_change_entry_timeout(entry, &outentry);
 	bento_invalidate_attr(dir);
-	err = finish_open(file, entry, generic_file_open, opened);
+	err = finish_open(file, entry, generic_file_open);
 	if (err) {
 		bento_sync_release(ff, flags);
 	} else {
@@ -469,7 +469,7 @@ out_err:
 static int bento_mknod(struct inode *, struct dentry *, umode_t, dev_t);
 static int bento_atomic_open(struct inode *dir, struct dentry *entry,
 			    struct file *file, unsigned flags,
-			    umode_t mode, int *opened)
+			    umode_t mode)
 {
 	int err;
 	struct bento_conn *fc = get_bento_conn(dir);
@@ -487,13 +487,10 @@ static int bento_atomic_open(struct inode *dir, struct dentry *entry,
 	if (!(flags & O_CREAT) || d_really_is_positive(entry))
 		goto no_open;
 
-	/* Only creates */
-	*opened |= FILE_CREATED;
-
 	if (fc->no_create)
 		goto mknod;
 
-	err = bento_create_open(dir, entry, file, flags, mode, opened);
+	err = bento_create_open(dir, entry, file, flags, mode);
 	if (err == -ENOSYS) {
 		fc->no_create = 1;
 		goto mknod;
@@ -523,6 +520,7 @@ static int create_new_entry(struct bento_conn *fc, struct bento_args *args,
 	int err = 0;
 	struct bento_in in;
 	struct bento_out out;
+	struct dentry *d;
 
 	forget = bento_alloc_forget();
 	if (!forget)
@@ -562,11 +560,7 @@ static int create_new_entry(struct bento_conn *fc, struct bento_args *args,
 	}
 	kfree(forget);
 
-	err = d_instantiate_no_diralias(entry, inode);
-	if (err)
-		return err;
-
-	bento_change_entry_timeout(entry, &outarg);
+	d_drop(entry);
 	bento_invalidate_attr(dir);
 	return 0;
 

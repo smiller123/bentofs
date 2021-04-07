@@ -10,6 +10,8 @@
 
 #include "bento_i.h"
 
+#include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/compat.h>
 #include <linux/falloc.h>
 
@@ -2065,7 +2067,7 @@ static void bento_vma_close(struct vm_area_struct *vma)
  * - sync(2)
  * - try_to_free_pages() with order > PAGE_ALLOC_COSTLY_ORDER
  */
-static int bento_page_mkwrite(struct vm_fault *vmf)
+static vm_fault_t bento_page_mkwrite(struct vm_fault *vmf)
 {
 	struct page *page = vmf->page;
 	struct inode *inode = file_inode(vmf->vma->vm_file);
@@ -2781,7 +2783,8 @@ static void bento_register_polled_file(struct bento_conn *fc,
 {
 	spin_lock(&fc->lock);
 	if (RB_EMPTY_NODE(&ff->polled_node)) {
-		struct rb_node **link, *uninitialized_var(parent);
+		struct rb_node **link;
+		struct rb_node *parent;
 
 		link = bento_find_polled_node(fc, ff->kh, &parent);
 		BUG_ON(*link);
